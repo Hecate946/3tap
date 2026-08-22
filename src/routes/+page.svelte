@@ -23,6 +23,7 @@
   let online = true;
   let menuOpen = false;
   let theme: 'light' | 'dark' = 'light';
+  let navScrolled = false;
   let panel: 'none' | 'pair' | 'recovery' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
@@ -35,6 +36,8 @@
   let newHabitInput: HTMLInputElement;
   let pendingHabitSave: Habit[] | null = null;
   let scroller: HTMLDivElement;
+  let bottomScroller: HTMLDivElement;
+  let bottomScrollWidth = 0;
   let currentDay = new Date();
   let windowEndOffset = 0;
   let visibleMonthLabel = '';
@@ -43,7 +46,7 @@
   let scrollRaf = 0;
   const WINDOW_DAYS = 84;
   const WINDOW_SHIFT = 28;
-  const PRE_START_CONTEXT_DAYS = 14;
+  let minimumVisibleDays = 32;
   const pendingByCell = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setInterval> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -66,6 +69,10 @@
   let dragMoveRaf = 0;
   let dragPendingY: number | null = null;
   let dragLastClientY: number | null = null;
+  let timelinePanPointerId: number | null = null;
+  let timelinePanStartX = 0;
+  let timelinePanStartScrollLeft = 0;
+  let timelinePanActive = false;
 
   const entries = new SvelteMap<string, Entry>();
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
@@ -98,14 +105,29 @@
     return start ? dateKey(start) : '';
   }
 
+  function calendarDayDistance(from: Date, to: Date) {
+    const fromUtc = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+    const toUtc = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+    return Math.floor((toUtc - fromUtc) / 86_400_000);
+  }
+
+  function placeholderDaysBeforeEnrollment(source: Board | null) {
+    const start = enrollmentDate(source);
+    if (!start) return minimumVisibleDays;
+    const today = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
+    const realDays = Math.max(1, calendarDayDistance(start, today) + 1);
+    return Math.max(0, minimumVisibleDays - realDays);
+  }
+
   function earliestTimelineKey(source: Board | null) {
     const start = enrollmentDate(source);
-    return start ? dateKey(shiftedDate(start, -PRE_START_CONTEXT_DAYS)) : '';
+    return start ? dateKey(shiftedDate(start, -placeholderDaysBeforeEnrollment(source))) : '';
   }
 
   function datesForWindow(source: Board | null, endDay: Date, endOffset: number): DayColumn[] {
     const end = shiftedDate(endDay, endOffset);
-    const start = shiftedDate(end, -(WINDOW_DAYS - 1));
+    const windowDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
+    const start = shiftedDate(end, -(windowDays - 1));
     const earliest = earliestTimelineKey(source);
     const days: DayColumn[] = [];
     const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
@@ -343,6 +365,41 @@
     };
   }
 
+  function updateMinimumVisibleDays() {
+    if (!scroller) return false;
+    const metrics = timelineMetrics();
+    if (!metrics || metrics.dayWidth <= 0) return false;
+    const timelineWidth = Math.max(0, scroller.clientWidth - metrics.habitWidth);
+    // One extra column absorbs fractional pixels/borders so the grid can never
+    // end before the right edge of the viewport.
+    const next = Math.max(1, Math.ceil(timelineWidth / metrics.dayWidth) + 1);
+    if (next === minimumVisibleDays) return false;
+    minimumVisibleDays = next;
+    return true;
+  }
+
+  function updateBottomScrollbar() {
+    if (!scroller) return;
+    bottomScrollWidth = scroller.scrollWidth;
+    if (!bottomScroller) return;
+
+    const syncPosition = () => {
+      if (bottomScroller && scroller && Math.abs(bottomScroller.scrollLeft - scroller.scrollLeft) > 0.5) {
+        bottomScroller.scrollLeft = scroller.scrollLeft;
+      }
+    };
+
+    syncPosition();
+    requestAnimationFrame(syncPosition);
+  }
+
+  function onBottomTimelineScroll() {
+    if (!scroller || !bottomScroller) return;
+    if (Math.abs(scroller.scrollLeft - bottomScroller.scrollLeft) > 0.5) {
+      scroller.scrollLeft = bottomScroller.scrollLeft;
+    }
+  }
+
   function updateTimelineStatus() {
     if (!scroller || !dates.length) return;
     const metrics = timelineMetrics();
@@ -380,6 +437,7 @@
         scroller.scrollLeft = metrics.habitWidth + nextIndex * metrics.dayWidth + anchor.offset;
       }
     }
+    updateBottomScrollbar();
   }
 
   async function maintainTimelineWindow() {
@@ -408,6 +466,9 @@
   }
 
   function onTimelineScroll() {
+    if (bottomScroller && scroller && Math.abs(bottomScroller.scrollLeft - scroller.scrollLeft) > 0.5) {
+      bottomScroller.scrollLeft = scroller.scrollLeft;
+    }
     if (scrollRaf) return;
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = 0;
@@ -416,11 +477,52 @@
     });
   }
 
+  function startTimelinePan(event: PointerEvent) {
+    if (!scroller || event.button !== 0 || event.pointerType !== 'mouse' || dragActive) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('.habit-name, .habit-head, input, textarea, button:not(:disabled)')) return;
+
+    event.preventDefault();
+    timelinePanPointerId = event.pointerId;
+    timelinePanStartX = event.clientX;
+    timelinePanStartScrollLeft = scroller.scrollLeft;
+    timelinePanActive = false;
+    scroller.setPointerCapture?.(event.pointerId);
+  }
+
+  function moveTimelinePan(event: PointerEvent) {
+    if (!scroller || event.pointerId !== timelinePanPointerId) return;
+    const dx = event.clientX - timelinePanStartX;
+    if (!timelinePanActive && Math.abs(dx) < 2) return;
+    if (!timelinePanActive) {
+      timelinePanActive = true;
+      document.documentElement.classList.add('timeline-panning-cursor');
+    }
+    event.preventDefault();
+    scroller.scrollLeft = timelinePanStartScrollLeft - dx;
+  }
+
+  function endTimelinePan(event: PointerEvent) {
+    if (!scroller || event.pointerId !== timelinePanPointerId) return;
+    if (scroller.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
+    timelinePanPointerId = null;
+    timelinePanActive = false;
+    document.documentElement.classList.remove('timeline-panning-cursor');
+  }
+
+  function cleanupTimelinePan() {
+    timelinePanPointerId = null;
+    timelinePanActive = false;
+    document.documentElement.classList.remove('timeline-panning-cursor');
+  }
+
   async function scrollToToday() {
     windowEndOffset = 0;
     await tick();
+    if (updateMinimumVisibleDays()) await tick();
     if (scroller) {
       scroller.scrollLeft = scroller.scrollWidth;
+      updateBottomScrollbar();
       updateTimelineStatus();
     }
   }
@@ -835,7 +937,15 @@
     const onOnline = () => credentials ? void sync() : void initialize();
     const onOffline = () => (online = false);
     const onVisibility = () => document.visibilityState === 'visible' && void sync();
-    const onResize = () => windowEndOffset === 0 ? void scrollToToday() : updateTimelineStatus();
+    const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
+    const onResize = () => {
+      const changed = updateMinimumVisibleDays();
+      if (windowEndOffset === 0 || changed) void scrollToToday();
+      else {
+        updateTimelineStatus();
+        void tick().then(updateBottomScrollbar);
+      }
+    };
     const onPageHide = () => {
       persistLocalStateNow();
       void flushHabitChanges();
@@ -848,6 +958,8 @@
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onVerticalScroll, { passive: true });
+    onVerticalScroll();
 
     syncTimer = setInterval(() => void sync(), 8000);
     scheduleNextDay();
@@ -859,6 +971,7 @@
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onVerticalScroll);
       if (syncTimer) clearInterval(syncTimer);
       if (dayTimer) clearTimeout(dayTimer);
       if (flushTimer) clearTimeout(flushTimer);
@@ -866,6 +979,7 @@
       if (habitFlushTimer) clearTimeout(habitFlushTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       cleanupHabitDrag(false);
+      cleanupTimelinePan();
     };
   });
 </script>
@@ -876,7 +990,7 @@
 </svelte:head>
 
 <div class="shell">
-  <header class="navbar">
+  <header class="navbar" class:scrolled={navScrolled}>
     <div class="brand">3tap</div>
     <nav class="nav-actions" aria-label="App controls">
       {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
@@ -929,7 +1043,15 @@
           {/if}
         </div>
       </div>
-      <div class="grid-scroll" bind:this={scroller} onscroll={onTimelineScroll}>
+      <div
+        class="grid-scroll"
+        bind:this={scroller}
+        onscroll={onTimelineScroll}
+        onpointerdown={startTimelinePan}
+        onpointermove={moveTimelinePan}
+        onpointerup={endTimelinePan}
+        onpointercancel={endTimelinePan}
+      >
         <table>
           <thead>
             <tr>
@@ -1040,6 +1162,17 @@
   {:else}
     <main aria-busy={loading}></main>
   {/if}
+
+  {#if board}
+    <div
+      class="bottom-scrollbar"
+      bind:this={bottomScroller}
+      onscroll={onBottomTimelineScroll}
+      aria-label="Timeline scrollbar"
+    >
+      <div class="bottom-scrollbar-content" style={`width:${bottomScrollWidth}px`}></div>
+    </div>
+  {/if}
 </div>
 
 {#if dragActive}
@@ -1082,8 +1215,8 @@
     --surface: #fffffc;
     --text: #11110f;
     --muted: #6e6e68;
-    --grid-weak-theme: #e3e3de;
-    --grid-strong-theme: #aaa9a2;
+    --grid-weak-theme: #e2e2dd;
+    --grid-strong-theme: #b0b0a9;
     --border: #d8d8d2;
     --panel-border: #d6d6d0;
     --hover: #ecece7;
@@ -1092,6 +1225,7 @@
     --press-fill: rgba(17,17,15,.07);
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
+    --nav-shadow: rgba(17,17,15,.08);
     background: var(--bg);
     color-scheme: light;
   }
@@ -1100,8 +1234,8 @@
     --surface: #181916;
     --text: #ecece6;
     --muted: #969790;
-    --grid-weak-theme: #2a2b28;
-    --grid-strong-theme: #62635d;
+    --grid-weak-theme: #2b2c29;
+    --grid-strong-theme: #585953;
     --border: #393a36;
     --panel-border: #444540;
     --hover: #20211e;
@@ -1110,6 +1244,7 @@
     --press-fill: rgba(255,255,248,.09);
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
+    --nav-shadow: rgba(0,0,0,.28);
     color-scheme: dark;
   }
   :global(body) {
@@ -1123,30 +1258,38 @@
   :global(button) { color: inherit; }
   :global(html.habit-dragging-cursor),
   :global(html.habit-dragging-cursor *) { cursor: grabbing !important; }
+  :global(html.timeline-panning-cursor),
+  :global(html.timeline-panning-cursor *) { cursor: grabbing !important; }
 
   .shell {
     --habit-width: 224px;
     --day-size: 48px;
+    --line: 1px;
     --grid-weak: var(--grid-weak-theme);
     --grid-strong: var(--grid-strong-theme);
     --page-inset: clamp(10px, 1.25vw, 16px);
     min-height: 100dvh;
-    padding: max(14px, env(safe-area-inset-top)) 0 max(18px, env(safe-area-inset-bottom));
+    padding: 0 0 calc(18px + env(safe-area-inset-bottom));
   }
   .navbar {
     position: sticky;
-    top: env(safe-area-inset-top, 0px);
+    top: 0;
     z-index: 40;
-    min-height: 38px;
+    height: calc(var(--day-size) + env(safe-area-inset-top));
+    min-height: calc(var(--day-size) + env(safe-area-inset-top));
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     width: 100%;
-    margin-bottom: 2px;
-    padding: 0 var(--page-inset);
+    margin: 0;
+    padding: env(safe-area-inset-top) var(--page-inset) 0;
     background: var(--bg);
+    border-bottom: var(--line) solid var(--grid-strong);
+    box-shadow: 0 0 0 transparent;
+    transition: box-shadow 90ms linear;
   }
+  .navbar.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
   .brand {
     flex: none;
     font-size: 12px;
@@ -1188,7 +1331,7 @@
   .menu {
     position: absolute;
     z-index: 30;
-    top: 36px;
+    top: 40px;
     right: 0;
     min-width: 136px;
     background: var(--bg);
@@ -1211,6 +1354,8 @@
     .habit-controls button:not(:disabled):hover { opacity: .9; }
     .cell:not(:disabled):hover { background: var(--hover); }
     .today-button:hover { opacity: .9; }
+    .grid-scroll { cursor: grab; }
+    .habit-name { cursor: grab; }
   }
 
   main { width: 100%; }
@@ -1219,7 +1364,8 @@
     display: grid;
     grid-template-columns: var(--habit-width) minmax(0, 1fr);
     align-items: center;
-    min-height: 24px;
+    height: 14px;
+    min-height: 14px;
     width: 100%;
   }
   .timeline-toolbar-spacer { min-width: 0; }
@@ -1236,7 +1382,8 @@
   }
   .timeline-toolbar-meta > span { white-space: nowrap; }
   .today-button {
-    min-height: 24px;
+    height: 14px;
+    min-height: 14px;
     padding: 0 2px;
     color: var(--text);
     font-size: 10px;
@@ -1248,14 +1395,16 @@
     overflow-x: auto;
     overflow-y: hidden;
     overscroll-behavior-x: contain;
-    scrollbar-width: thin;
-    padding-bottom: 8px;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
     -webkit-overflow-scrolling: touch;
   }
+  .grid-scroll::-webkit-scrollbar { display: none; }
   table {
     border-collapse: separate;
     border-spacing: 0;
     width: max-content;
+    min-width: 100%;
     table-layout: fixed;
     background: transparent;
   }
@@ -1265,7 +1414,7 @@
   tbody tr:not(.add-row) > th,
   tbody tr:not(.add-row) > td {
     height: var(--day-size);
-    border-bottom: 1px solid var(--grid-weak);
+    border-bottom: var(--line) solid var(--grid-weak);
   }
   thead th {
     height: 34px;
@@ -1275,7 +1424,7 @@
     opacity: .5;
     text-align: center;
     background: transparent;
-    border-bottom: 1px solid var(--grid-strong);
+    border-bottom: var(--line) solid var(--grid-strong);
   }
   thead th.day-head,
   td {
@@ -1283,14 +1432,26 @@
     min-width: var(--day-size);
     max-width: var(--day-size);
   }
-  /* One owner per vertical boundary: day cells draw their left separator. */
+  /* Vertical rules are overlays, not borders, so they always paint above
+     horizontal rules at intersections. Every boundary is still exactly 1px. */
   thead th.day-head,
-  tbody td { border-left: 1px solid var(--grid-weak); }
+  tbody td { position: relative; }
+  thead th.day-head::before,
+  tbody td::before {
+    content: '';
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    bottom: -1px;
+    left: 0;
+    width: var(--line);
+    background: var(--grid-weak);
+    pointer-events: none;
+  }
 
-  /* The sticky habit/timeline split owns this boundary, so suppress the
-     adjacent first date separator to avoid a doubled line. */
-  thead .habit-head + .day-head,
-  tbody .habit-name + td { border-left-color: transparent; }
+  /* The sticky habit/timeline divider owns the first vertical boundary. */
+  thead .habit-head + .day-head::before,
+  tbody .habit-name + td::before { display: none; }
   thead th span,
   thead th strong { display: block; font-weight: 400; line-height: 1.2; }
   thead th strong { font-size: 11px; }
@@ -1305,7 +1466,18 @@
     min-width: var(--habit-width);
     max-width: var(--habit-width);
     background: var(--bg);
-    border-right: 1px solid var(--grid-strong);
+  }
+  .habit-head::after,
+  .habit-name::after {
+    content: '';
+    position: absolute;
+    z-index: 9;
+    top: 0;
+    bottom: -1px;
+    right: 0;
+    width: var(--line);
+    background: var(--grid-strong);
+    pointer-events: none;
   }
   .habit-head { z-index: 8; }
   .habit-name {
@@ -1382,7 +1554,7 @@
     min-width: 0;
     height: 30px;
     border: 0;
-    border-bottom: 1px solid var(--grid-strong);
+    border-bottom: var(--line) solid var(--grid-strong);
     border-radius: 0;
     outline: none;
     background: transparent;
@@ -1410,8 +1582,9 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: var(--today-fill); }
-  /* The only strong date divider: when tracking began. */
-  .enrolled { border-left-color: var(--grid-strong); }
+  /* The only strong date divider inside the timeline: tracking start. */
+  thead th.day-head.enrolled::before,
+  tbody td.enrolled::before { background: var(--grid-strong); }
   td.prestart { background: var(--prestart-fill); }
   td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
@@ -1427,12 +1600,29 @@
     -webkit-tap-highlight-color: transparent;
   }
   .cell.plus { font-weight: 750; font-size: 17px; }
-  .cell:disabled { color: inherit; }
+  .cell:disabled { color: inherit; pointer-events: none; }
   td.locked .cell { opacity: .58; }
   td.prestart .cell { opacity: .26; }
   td.today .cell { opacity: 1; }
   td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .42; }
   .cell:not(:disabled):active { background: var(--press-fill); }
+
+  .bottom-scrollbar {
+    position: fixed;
+    z-index: 55;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(15px + env(safe-area-inset-bottom));
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    background: var(--bg);
+    border-top: var(--line) solid var(--grid-weak);
+    scrollbar-width: auto;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bottom-scrollbar-content { height: 1px; }
 
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
   .panel { position: relative; width: min(390px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 24px; }
@@ -1450,9 +1640,8 @@
       --habit-width: 190px;
       --day-size: 48px;
     }
-    .navbar { min-height: 36px; }
     .nav-icon { width: 32px; height: 32px; }
-    .timeline-toolbar { min-height: 22px; }
+    .timeline-toolbar { height: 14px; min-height: 14px; }
     .timeline-toolbar-meta { padding-left: 7px; }
     .habit-name { padding-left: var(--page-inset); padding-right: 2px; }
     .habit-controls button { width: 27px; height: 42px; font-size: 17px; }
