@@ -16,6 +16,7 @@ export type Entry = {
 export type Board = {
   id: string;
   createdAt: string;
+  updatedAt?: string;
   habits: Habit[];
   entries: Entry[];
 };

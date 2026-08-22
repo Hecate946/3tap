@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { setCredentials } from '$lib/client';
+  import { clearLocalBoard, setCredentials } from '$lib/client';
 
   let message = 'pairing…';
 
@@ -20,6 +20,7 @@
       return;
     }
 
+    clearLocalBoard();
     setCredentials({ boardId, secret });
     history.replaceState(null, '', '/pair');
     await goto('/', { replaceState: true });

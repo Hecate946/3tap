@@ -63,7 +63,21 @@ Pairing links are generated from `location.origin`, so production QR codes autom
 - Pair links use the URL fragment (`#...`), so the raw secret is not sent in the initial HTTP request or server logs.
 - The UI is optimistic and caches the board locally.
 - Failed taps are queued in localStorage and replayed when connectivity returns.
-- Devices refresh every 3 seconds and whenever the app regains focus.
+- Visible devices do a lightweight change check every 8 seconds and sync immediately on focus/reconnect.
+
+## Performance design
+
+- taps update locally before any network request
+- reactive entry map gives O(1) cell lookup instead of scanning history
+- rapid edits are compacted and batched into one API request
+- cached-board serialization is deferred off the tap path
+- unchanged sync checks return HTTP 304 instead of downloading the board
+- QR generation is lazy-loaded only when Add device is opened
+- immutable PWA assets are served cache-first
+- hidden tabs stop doing sync work
+- the day rollover uses one midnight timer instead of constant date polling
+
+If you already ran an older 3tap schema, run `supabase/performance.sql` once before starting this version.
 
 ## V1 scope
 

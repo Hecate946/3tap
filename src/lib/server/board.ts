@@ -2,21 +2,33 @@ import { error } from '@sveltejs/kit';
 import { db } from './db';
 import type { Board } from '$lib/types';
 
-export async function getBoard(boardId: string): Promise<Board> {
-  const [{ data: board, error: boardError }, { data: habits, error: habitsError }, { data: entries, error: entriesError }] =
-    await Promise.all([
-      db.from('boards').select('id, created_at').eq('id', boardId).single(),
-      db.from('habits').select('id, name, position').eq('board_id', boardId).order('position'),
-      db.from('entries').select('habit_id, entry_date, value, updated_at').eq('board_id', boardId)
-    ]);
+type BoardMeta = {
+  id: string;
+  created_at: string;
+  updated_at?: string | null;
+};
 
-  if (boardError) throw error(500, boardError.message);
+export async function getBoard(boardId: string, metadata?: BoardMeta): Promise<Board> {
+  const [boardResult, habitsResult, entriesResult] = await Promise.all([
+    metadata
+      ? Promise.resolve({ data: metadata, error: null })
+      : db.from('boards').select('id, created_at, updated_at').eq('id', boardId).single(),
+    db.from('habits').select('id, name, position').eq('board_id', boardId).order('position'),
+    db.from('entries').select('habit_id, entry_date, value, updated_at').eq('board_id', boardId)
+  ]);
+
+  const { data: board, error: boardError } = boardResult;
+  const { data: habits, error: habitsError } = habitsResult;
+  const { data: entries, error: entriesError } = entriesResult;
+
+  if (boardError || !board) throw error(500, boardError?.message ?? 'Board not found');
   if (habitsError) throw error(500, habitsError.message);
   if (entriesError) throw error(500, entriesError.message);
 
   return {
     id: board.id,
     createdAt: board.created_at,
+    updatedAt: board.updated_at ?? undefined,
     habits: (habits ?? []).map((habit) => ({
       id: habit.id,
       name: habit.name,

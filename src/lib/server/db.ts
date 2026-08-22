@@ -36,7 +36,7 @@ export async function assertBoard(event: RequestEvent, boardId: string) {
   const secret = readSecret(event.request);
   const { data, error: dbError } = await db
     .from('boards')
-    .select('id, secret_hash, created_at')
+    .select('id, secret_hash, created_at, updated_at')
     .eq('id', boardId)
     .maybeSingle();
 

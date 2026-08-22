@@ -55,5 +55,9 @@ export async function PUT(event: RequestEvent) {
   const { error: upsertError } = await db.from('habits').upsert(rows, { onConflict: 'id' });
   if (upsertError) throw error(500, upsertError.message);
 
+  const now = new Date().toISOString();
+  const { error: touchError } = await db.from('boards').update({ updated_at: now }).eq('id', id);
+  if (touchError) throw error(500, touchError.message);
+
   return json(await getBoard(id));
 }

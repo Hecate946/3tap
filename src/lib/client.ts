@@ -48,6 +48,12 @@ export function setQueue(queue: PendingEntry[]) {
   localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
 }
 
+export function compactQueue(queue: PendingEntry[]) {
+  const compacted = new Map<string, PendingEntry>();
+  for (const change of queue) compacted.set(`${change.habitId}\u0000${change.date}`, change);
+  return [...compacted.values()];
+}
+
 export function clearLocalBoard() {
   if (!browser) return;
   localStorage.removeItem(CREDS_KEY);

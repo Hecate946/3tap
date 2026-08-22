@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import QRCode from 'qrcode';
-  import type { Board, Credentials, Habit, MarkValue } from '$lib/types';
+  import { SvelteMap } from 'svelte/reactivity';
+  import type { Board, Credentials, Entry, Habit, MarkValue } from '$lib/types';
   import {
     authHeaders,
     clearLocalBoard,
+    compactQueue,
     getCachedBoard,
     getCredentials,
     getQueue,
@@ -13,6 +14,8 @@
     setQueue,
     type PendingEntry
   } from '$lib/client';
+
+  type DayColumn = { key: string; weekday: string; day: number };
 
   let board: Board | null = null;
   let credentials: Credentials | null = null;
@@ -26,9 +29,15 @@
   let habitDrafts: Habit[] = [];
   let scroller: HTMLDivElement;
   let currentDay = new Date();
+  const pendingByCell = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setInterval> | undefined;
-  let dayTimer: ReturnType<typeof setInterval> | undefined;
+  let dayTimer: ReturnType<typeof setTimeout> | undefined;
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  let flushPromise: Promise<void> | null = null;
+  let syncPromise: Promise<void> | null = null;
 
+  const entries = new SvelteMap<string, Entry>();
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
 
   function dateKey(date: Date) {
@@ -38,59 +47,111 @@
     return `${y}-${m}-${d}`;
   }
 
-  function datesForBoard(source: Board | null) {
+  function cellKey(habitId: string, date: string) {
+    return `${habitId}\u0000${date}`;
+  }
+
+  function datesForBoard(source: Board | null, endDay: Date): DayColumn[] {
     if (!source) return [];
     const created = new Date(source.createdAt);
     const start = new Date(created.getFullYear(), created.getMonth(), created.getDate(), 12);
-    const end = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
-    const dates: Date[] = [];
+    const end = new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate(), 12);
+    const days: DayColumn[] = [];
+    const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
+
     for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
-      dates.push(new Date(cursor));
+      days.push({ key: dateKey(cursor), weekday: weekday.format(cursor), day: cursor.getDate() });
     }
-    return dates;
+    return days;
   }
 
-  $: dates = datesForBoard(board);
+  $: dates = datesForBoard(board, currentDay);
   $: todayKey = dateKey(currentDay);
 
+  function hydrateEntries(source: Board | null) {
+    entries.clear();
+    for (const entry of source?.entries ?? []) entries.set(cellKey(entry.habitId, entry.date), entry);
+  }
+
   function valueFor(habitId: string, date: string): MarkValue {
-    const entry = board?.entries.find((item) => item.habitId === habitId && item.date === date);
-    return (entry?.value ?? 0) as MarkValue;
+    return (entries.get(cellKey(habitId, date))?.value ?? 0) as MarkValue;
   }
 
   function applyLocalEntry(change: PendingEntry) {
     if (!board) return;
-    const rest = board.entries.filter(
-      (entry) => !(entry.habitId === change.habitId && entry.date === change.date)
-    );
-    board = {
-      ...board,
-      entries:
-        change.value === 0
-          ? rest
-          : [
-              ...rest,
-              {
-                habitId: change.habitId,
-                date: change.date,
-                value: change.value as 1 | 2,
-                updatedAt: new Date().toISOString()
-              }
-            ]
-    };
-    setCachedBoard(board);
+    const key = cellKey(change.habitId, change.date);
+    if (change.value === 0) {
+      entries.delete(key);
+    } else {
+      entries.set(key, {
+        habitId: change.habitId,
+        date: change.date,
+        value: change.value as 1 | 2,
+        updatedAt: ''
+      });
+    }
   }
 
-  async function tapCell(habitId: string, date: string) {
+  function pendingChanges() {
+    return [...pendingByCell.values()];
+  }
+
+  function persistLocalStateNow() {
+    if (board) {
+      const logicalEntries = new Map(entries);
+      for (const change of pendingChanges()) {
+        const key = cellKey(change.habitId, change.date);
+        if (change.value === 0) logicalEntries.delete(key);
+        else {
+          logicalEntries.set(key, {
+            habitId: change.habitId,
+            date: change.date,
+            value: change.value as 1 | 2,
+            updatedAt: ''
+          });
+        }
+      }
+      board.entries = [...logicalEntries.values()];
+      setCachedBoard(board);
+    }
+    setQueue(pendingChanges());
+  }
+
+  function schedulePersistence() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = undefined;
+      persistLocalStateNow();
+    }, 300);
+  }
+
+  function queueChange(change: PendingEntry) {
+    pendingByCell.set(cellKey(change.habitId, change.date), change);
+    schedulePersistence();
+
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined;
+      void flushQueue();
+    }, 120);
+  }
+
+  function tapCell(habitId: string, date: string, button?: HTMLButtonElement) {
     const current = valueFor(habitId, date);
     const next = ((current + 1) % 3) as MarkValue;
     const change = { habitId, date, value: next };
-    applyLocalEntry(change);
 
-    const queue = getQueue();
-    queue.push(change);
-    setQueue(queue);
-    await flushQueue();
+    // Update the actual DOM node first. This is the shortest possible visual path:
+    // pointer event -> text mutation. Svelte state, persistence and network syncing
+    // all happen afterward and never gate what the user sees.
+    if (button) {
+      button.textContent = symbols[next];
+      button.classList.toggle('plus', next === 2);
+      button.setAttribute('aria-label', `${date}: ${symbols[next]}`);
+    }
+
+    applyLocalEntry(change);
+    queueChange(change);
   }
 
   async function createBoard() {
@@ -100,52 +161,87 @@
     credentials = data.credentials;
     board = data.board;
     setCredentials(credentials!);
+    hydrateEntries(board);
     setCachedBoard(board!);
   }
 
-  async function fetchBoard() {
+  async function fetchBoard(force = false) {
     if (!credentials) return;
-    const response = await fetch(`/api/boards/${credentials.boardId}`, {
-      headers: authHeaders(credentials)
-    });
+    const headers: Record<string, string> = authHeaders(credentials);
+    if (!force && board?.updatedAt) headers['if-none-match'] = `"${board.updatedAt}"`;
+
+    const response = await fetch(`/api/boards/${credentials.boardId}`, { headers });
+    if (response.status === 304) return;
     if (!response.ok) {
       if (response.status === 401 || response.status === 404) return;
       throw new Error(await response.text());
     }
+
     board = await response.json();
-    setCachedBoard(board!);
+    hydrateEntries(board);
+    for (const change of pendingChanges()) applyLocalEntry(change);
+    persistLocalStateNow();
   }
 
-  async function flushQueue() {
-    if (!credentials || !navigator.onLine) return;
-    let queue = getQueue();
-    while (queue.length) {
-      const change = queue[0];
+  async function flushQueue(options: { keepalive?: boolean } = {}) {
+    if (flushPromise) return flushPromise;
+    if (!credentials || !navigator.onLine || pendingByCell.size === 0) return;
+
+    flushPromise = (async () => {
+      // Keep object identity so an older request can never delete a newer tap.
+      const sent = new Map(pendingByCell);
       try {
-        const response = await fetch(`/api/boards/${credentials.boardId}/entries`, {
+        const response = await fetch(`/api/boards/${credentials!.boardId}/entries`, {
           method: 'PUT',
-          headers: authHeaders(credentials),
-          body: JSON.stringify(change)
+          headers: authHeaders(credentials!),
+          body: JSON.stringify({ changes: [...sent.values()] }),
+          keepalive: options.keepalive ?? false
         });
         if (!response.ok) throw new Error(await response.text());
-        queue = queue.slice(1);
-        setQueue(queue);
+
+        for (const [key, change] of sent) {
+          if (pendingByCell.get(key) === change) pendingByCell.delete(key);
+        }
+        schedulePersistence();
+        online = true;
       } catch {
-        online = false;
-        return;
+        online = navigator.onLine;
+      } finally {
+        flushPromise = null;
+        // If taps landed during the request, send the newest state next.
+        if (pendingByCell.size && navigator.onLine) {
+          if (flushTimer) clearTimeout(flushTimer);
+          flushTimer = setTimeout(() => {
+            flushTimer = undefined;
+            void flushQueue();
+          }, 40);
+        }
       }
-    }
-    online = true;
+    })();
+
+    return flushPromise;
   }
 
   async function sync() {
-    if (!credentials || !navigator.onLine) {
+    if (syncPromise) return syncPromise;
+    if (!credentials || !navigator.onLine || document.visibilityState === 'hidden') {
       online = navigator.onLine;
       return;
     }
-    await flushQueue();
-    if (getQueue().length === 0) await fetchBoard();
-    online = true;
+
+    syncPromise = (async () => {
+      try {
+        await flushQueue();
+        await fetchBoard();
+        online = true;
+      } catch {
+        online = navigator.onLine;
+      } finally {
+        syncPromise = null;
+      }
+    })();
+
+    return syncPromise;
   }
 
   async function scrollToToday() {
@@ -157,12 +253,19 @@
     if (!credentials) return;
     menuOpen = false;
     panel = 'pair';
-    pairingLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
-    qrDataUrl = await QRCode.toDataURL(pairingLink, {
-      width: 280,
-      margin: 1,
-      color: { dark: '#11110f', light: '#f7f7f5' }
-    });
+    const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
+    if (pairingLink !== nextLink) {
+      pairingLink = nextLink;
+      qrDataUrl = '';
+    }
+    if (!qrDataUrl) {
+      const { toDataURL } = await import('qrcode');
+      qrDataUrl = await toDataURL(pairingLink, {
+        width: 280,
+        margin: 1,
+        color: { dark: '#11110f', light: '#f7f7f5' }
+      });
+    }
   }
 
   function openHabits() {
@@ -203,7 +306,8 @@
     });
     if (!response.ok) return;
     board = await response.json();
-    setCachedBoard(board!);
+    hydrateEntries(board);
+    persistLocalStateNow();
     panel = 'none';
   }
 
@@ -222,8 +326,13 @@
 
     setCredentials(next);
     credentials = next;
+    board = null;
+    entries.clear();
+    qrDataUrl = '';
+    pairingLink = '';
+    pendingByCell.clear();
     setQueue([]);
-    await fetchBoard();
+    await fetchBoard(true);
     panel = 'none';
     await scrollToToday();
   }
@@ -234,6 +343,7 @@
 
   function exportData() {
     if (!board) return;
+    persistLocalStateNow();
     const blob = new Blob([JSON.stringify(board, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -248,6 +358,8 @@
     clearLocalBoard();
     credentials = null;
     board = null;
+    entries.clear();
+    pendingByCell.clear();
     panel = 'none';
     menuOpen = false;
     loading = true;
@@ -256,45 +368,71 @@
     await scrollToToday();
   }
 
-  onMount(async () => {
+  function scheduleNextDay() {
+    if (dayTimer) clearTimeout(dayTimer);
+    const now = new Date();
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
+    dayTimer = setTimeout(() => {
+      currentDay = new Date();
+      void scrollToToday();
+      scheduleNextDay();
+    }, next.getTime() - now.getTime());
+  }
+
+  async function initialize() {
     online = navigator.onLine;
     credentials = getCredentials();
     board = getCachedBoard();
+    pendingByCell.clear();
+    for (const change of compactQueue(getQueue())) {
+      pendingByCell.set(cellKey(change.habitId, change.date), change);
+    }
+    if (!credentials) pendingByCell.clear();
+    hydrateEntries(board);
+    for (const change of pendingChanges()) applyLocalEntry(change);
 
     try {
       if (!credentials) await createBoard();
       else await sync();
     } catch {
-      online = false;
+      online = navigator.onLine;
     } finally {
       loading = false;
       await scrollToToday();
     }
+  }
 
-    const onFocus = () => sync();
-    const onOnline = () => sync();
+  onMount(() => {
+    void initialize();
+
+    const onFocus = () => void sync();
+    const onOnline = () => void sync();
     const onOffline = () => (online = false);
-    const onVisibility = () => document.visibilityState === 'visible' && sync();
+    const onVisibility = () => document.visibilityState === 'visible' && void sync();
+    const onPageHide = () => {
+      persistLocalStateNow();
+      void flushQueue({ keepalive: true });
+    };
 
     window.addEventListener('focus', onFocus);
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
+    window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibility);
 
-    syncTimer = setInterval(sync, 3000);
-    dayTimer = setInterval(async () => {
-      const before = dateKey(currentDay);
-      currentDay = new Date();
-      if (dateKey(currentDay) !== before) await scrollToToday();
-    }, 30000);
+    syncTimer = setInterval(() => void sync(), 8000);
+    scheduleNextDay();
 
     return () => {
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
+      window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibility);
       if (syncTimer) clearInterval(syncTimer);
-      if (dayTimer) clearInterval(dayTimer);
+      if (dayTimer) clearTimeout(dayTimer);
+      if (flushTimer) clearTimeout(flushTimer);
+      if (persistTimer) clearTimeout(persistTimer);
     };
   });
 </script>
@@ -330,28 +468,31 @@
           <thead>
             <tr>
               <th class="habit-head"></th>
-              {#each dates as date}
-                {@const key = dateKey(date)}
-                <th class:today={key === todayKey}>
-                  <span>{date.toLocaleDateString(undefined, { weekday: 'narrow' })}</span>
-                  <strong>{date.getDate()}</strong>
+              {#each dates as date (date.key)}
+                <th class:today={date.key === todayKey}>
+                  <span>{date.weekday}</span>
+                  <strong>{date.day}</strong>
                 </th>
               {/each}
             </tr>
           </thead>
           <tbody>
-            {#each board.habits as habit}
+            {#each board.habits as habit (habit.id)}
               <tr>
                 <th class="habit-name">{habit.name}</th>
-                {#each dates as date}
-                  {@const key = dateKey(date)}
-                  {@const value = valueFor(habit.id, key)}
-                  <td class:today={key === todayKey}>
+                {#each dates as date (date.key)}
+                  {@const value = valueFor(habit.id, date.key)}
+                  <td class:today={date.key === todayKey}>
                     <button
                       class:plus={value === 2}
                       class="cell"
-                      aria-label={`${habit.name}, ${key}: ${symbols[value]}`}
-                      onclick={() => tapCell(habit.id, key)}>{symbols[value]}</button>
+                      aria-label={`${habit.name}, ${date.key}: ${symbols[value]}`}
+                      onpointerdown={(event) => {
+                        if (event.button === 0) tapCell(habit.id, date.key, event.currentTarget);
+                      }}
+                      onclick={(event) => {
+                        if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
+                      }}>{symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
@@ -432,12 +573,18 @@
     box-shadow: 0 8px 24px rgba(0,0,0,.06);
   }
   .menu button { display: block; width: 100%; padding: 8px 9px; text-align: left; font-size: 12px; }
-  .menu button:hover { background: #ecece7; }
+  @media (hover: hover) and (pointer: fine) { .menu button:hover { background: #ecece7; } }
 
   main { width: 100%; }
   .center { min-height: 60dvh; display: grid; place-items: center; font-size: 12px; opacity: .55; }
-  .grid-scroll { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; padding-bottom: 8px; }
-  table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }
+  .grid-scroll {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    padding-bottom: 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+  table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; table-layout: fixed; }
   th, td { padding: 0; height: 48px; border-bottom: 1px solid #deded8; }
   thead th { height: 42px; vertical-align: bottom; font-weight: 400; font-size: 10px; opacity: .46; min-width: 46px; text-align: center; }
   thead th span, thead th strong { display: block; font-weight: 400; line-height: 1.25; }
@@ -447,7 +594,7 @@
   .habit-name { min-width: 126px; width: 126px; padding-right: 16px; text-align: left; font-size: 12px; font-weight: 400; white-space: nowrap; }
   td { width: 46px; min-width: 46px; text-align: center; }
   .today { background: rgba(17,17,15,.035); }
-  .cell { width: 100%; height: 100%; font-size: 16px; font-weight: 400; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  .cell { width: 100%; height: 100%; font-size: 16px; font-weight: 400; touch-action: manipulation; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
   .cell.plus { font-weight: 750; font-size: 17px; }
   .cell:active { background: rgba(17,17,15,.07); }
 

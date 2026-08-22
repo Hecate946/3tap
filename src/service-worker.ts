@@ -4,10 +4,11 @@ import { build, files, version } from '$service-worker';
 
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const CACHE = `3tap-${version}`;
-const ASSETS = [...build, ...files, '/'];
+const PRECACHE = [...build, ...files, '/'];
+const IMMUTABLE = new Set(build);
 
 worker.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)));
   worker.skipWaiting();
 });
 
@@ -25,12 +26,32 @@ worker.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
 
+  if (IMMUTABLE.has(url.pathname)) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => cached ?? fetch(event.request))
+    );
+    return;
+  }
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).catch(async () => {
+        const cached = await caches.match(event.request);
+        return cached ?? (await caches.match('/')) ?? new Response('offline', { status: 503 });
+      })
+    );
+    return;
+  }
+
   event.respondWith(
-    fetch(event.request).catch(async () => {
-      const cached = await caches.match(event.request);
-      if (cached) return cached;
-      const home = await caches.match('/');
-      return home ?? new Response('offline', { status: 503 });
-    })
+    caches.match(event.request).then((cached) =>
+      cached ?? fetch(event.request).then((response) => {
+        if (response.ok) {
+          const copy = response.clone();
+          void caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        }
+        return response;
+      })
+    )
   );
 });
