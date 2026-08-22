@@ -702,7 +702,7 @@
   }
 
   function removeHabit(index: number) {
-    if (!board || board.habits.length <= 1) return;
+    if (!board) return;
     const removed = board.habits[index];
     if (!removed) return;
     const prefix = `${removed.id}\u0000`;
@@ -981,7 +981,7 @@
                     <div class="habit-controls">
                       <button disabled={habitIndex === 0} aria-label={`Move ${habit.name} up`} onclick={() => moveHabit(habitIndex, -1)}>↑</button>
                       <button disabled={habitIndex === board.habits.length - 1} aria-label={`Move ${habit.name} down`} onclick={() => moveHabit(habitIndex, 1)}>↓</button>
-                      <button class="delete-habit" disabled={board.habits.length <= 1} aria-label={`Remove ${habit.name}`} onclick={() => removeHabit(habitIndex)}>×</button>
+                      <button class="delete-habit" aria-label={`Remove ${habit.name}`} onclick={() => removeHabit(habitIndex)}>×</button>
                     </div>
                   </div>
                 </th>

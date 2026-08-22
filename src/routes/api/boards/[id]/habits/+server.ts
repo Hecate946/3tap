@@ -24,7 +24,6 @@ export async function PUT(event: RequestEvent) {
     })
     .filter(Boolean) as { id: string; name: string }[];
 
-  if (cleaned.length === 0) throw error(400, 'Keep at least one habit');
 
   const { data: existing, error: existingError } = await db
     .from('habits')
@@ -72,8 +71,10 @@ export async function PUT(event: RequestEvent) {
     position
   }));
 
-  const { error: upsertError } = await db.from('habits').upsert(rows, { onConflict: 'id' });
-  if (upsertError) throw error(500, upsertError.message);
+  if (rows.length) {
+    const { error: upsertError } = await db.from('habits').upsert(rows, { onConflict: 'id' });
+    if (upsertError) throw error(500, upsertError.message);
+  }
 
   const now = new Date().toISOString();
   const { error: touchError } = await db.from('boards').update({ updated_at: now }).eq('id', id);
