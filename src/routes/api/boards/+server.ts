@@ -42,7 +42,7 @@ export async function POST() {
       id: boardId,
       createdAt: now,
       updatedAt: now,
-      habits: habits.map(({ id, name, position }) => ({ id, name, position })),
+      habits: habits.map(({ id, name, position }) => ({ id, name, position, createdAt: now })),
       entries: []
     }
   });

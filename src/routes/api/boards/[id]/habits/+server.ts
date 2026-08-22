@@ -33,9 +33,29 @@ export async function PUT(event: RequestEvent) {
   if (existingError) throw error(500, existingError.message);
 
   const existingIds = new Set((existing ?? []).map((habit) => habit.id));
-  const safeCleaned = cleaned.map((habit) => ({
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const requested = cleaned.map((habit) => ({
     ...habit,
-    id: existingIds.has(habit.id) ? habit.id : randomUUID()
+    id: existingIds.has(habit.id) || uuidPattern.test(habit.id) ? habit.id : randomUUID()
+  }));
+
+  const candidateNewIds = requested
+    .map((habit) => habit.id)
+    .filter((habitId) => !existingIds.has(habitId));
+
+  let collisions = new Set<string>();
+  if (candidateNewIds.length) {
+    const { data: collidingRows, error: collisionError } = await db
+      .from('habits')
+      .select('id')
+      .in('id', candidateNewIds);
+    if (collisionError) throw error(500, collisionError.message);
+    collisions = new Set((collidingRows ?? []).map((habit) => habit.id));
+  }
+
+  const safeCleaned = requested.map((habit) => ({
+    ...habit,
+    id: collisions.has(habit.id) ? randomUUID() : habit.id
   }));
   const incomingIds = new Set(safeCleaned.map((habit) => habit.id));
   const removedIds = [...existingIds].filter((habitId) => !incomingIds.has(habitId));

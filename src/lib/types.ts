@@ -4,6 +4,7 @@ export type Habit = {
   id: string;
   name: string;
   position: number;
+  createdAt?: string;
 };
 
 export type Entry = {
