@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { flip } from 'svelte/animate';
   import { SvelteMap } from 'svelte/reactivity';
   import type { Board, Credentials, Entry, Habit, MarkValue } from '$lib/types';
   import {
@@ -55,7 +56,7 @@
   let dragPointerId: number | null = null;
   let dragCandidate: { habitId: string; startX: number; startY: number; offsetY: number } | null = null;
   let dragActive = false;
-  let dragDropIndex = 0;
+  let dragOriginalHabits: Habit[] | null = null;
   let dragPreviewName = '';
   let dragPreviewLeft = 0;
   let dragPreviewTop = 0;
@@ -524,21 +525,6 @@
     setLocalHabits(copy);
   }
 
-  function habitsWithoutDragged() {
-    if (!board || !draggingHabitId) return [];
-    return board.habits.filter((habit) => habit.id !== draggingHabitId);
-  }
-
-  function dropBeforeHabitId() {
-    const remaining = habitsWithoutDragged();
-    return dragDropIndex < remaining.length ? remaining[dragDropIndex]?.id ?? null : null;
-  }
-
-  function dropAfterHabitId() {
-    const remaining = habitsWithoutDragged();
-    return dragDropIndex >= remaining.length ? remaining.at(-1)?.id ?? null : null;
-  }
-
   function blockDragClick(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -554,51 +540,72 @@
     const rect = cell.getBoundingClientRect();
     dragActive = true;
     draggingHabitId = habit.id;
+    dragOriginalHabits = [...board.habits];
     dragPreviewName = habit.name;
     dragPreviewLeft = rect.left;
     dragPreviewWidth = rect.width;
     dragPreviewHeight = rect.height;
     dragPreviewTop = event.clientY - dragCandidate.offsetY;
-    dragDropIndex = board.habits.findIndex((item) => item.id === habit.id);
     window.addEventListener('click', blockDragClick, true);
   }
 
-  function updateDropIndex(clientY: number) {
+  function updateLiveHabitOrder(clientY: number) {
     if (!board || !draggingHabitId) return;
-    const rows = [...document.querySelectorAll<HTMLTableRowElement>('tr[data-habit-id]')]
+
+    const currentIndex = board.habits.findIndex((habit) => habit.id === draggingHabitId);
+    if (currentIndex < 0) return;
+
+    const otherRows = [...document.querySelectorAll<HTMLTableRowElement>('tr[data-habit-id]')]
       .filter((row) => row.dataset.habitId !== draggingHabitId);
-    let nextIndex = 0;
-    for (const row of rows) {
-      const rect = row.getBoundingClientRect();
-      if (clientY < rect.top + rect.height / 2) break;
-      nextIndex += 1;
+
+    const remaining = board.habits.filter((habit) => habit.id !== draggingHabitId);
+    let targetIndex = remaining.length;
+
+    for (let index = 0; index < otherRows.length; index += 1) {
+      const rect = otherRows[index].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) {
+        targetIndex = index;
+        break;
+      }
     }
-    dragDropIndex = nextIndex;
+
+    const dragged = board.habits[currentIndex];
+    const next = [...remaining];
+    next.splice(targetIndex, 0, dragged);
+    const nextIndex = next.findIndex((habit) => habit.id === draggingHabitId);
+    if (nextIndex === currentIndex) return;
+
+    // Reorder locally only. The server is updated once, on release.
+    board = { ...board, habits: normalizeHabits(next) };
   }
 
-  function commitHabitDrop() {
-    if (!board || !draggingHabitId) return;
-    const from = board.habits.findIndex((habit) => habit.id === draggingHabitId);
-    if (from < 0) return;
-    const next = [...board.habits];
-    const [moved] = next.splice(from, 1);
-    const target = Math.max(0, Math.min(dragDropIndex, next.length));
-    next.splice(target, 0, moved);
-    if (target !== from) setLocalHabits(next);
+  function sameHabitOrder(a: Habit[], b: Habit[]) {
+    return a.length === b.length && a.every((habit, index) => habit.id === b[index]?.id);
   }
 
   function cleanupHabitDrag(commit = false) {
-    if (commit && dragActive) commitHabitDrop();
+    const finalHabits = board?.habits ? [...board.habits] : null;
+    const originalHabits = dragOriginalHabits;
+
     window.removeEventListener('pointermove', onHabitDragMove);
     window.removeEventListener('pointerup', onHabitDragEnd);
     window.removeEventListener('pointercancel', onHabitDragCancel);
     if (dragActive) setTimeout(() => window.removeEventListener('click', blockDragClick, true), 0);
     else window.removeEventListener('click', blockDragClick, true);
 
+    if (board && originalHabits) {
+      if (commit && finalHabits && !sameHabitOrder(originalHabits, finalHabits)) {
+        setLocalHabits(finalHabits);
+      } else if (!commit) {
+        board = { ...board, habits: normalizeHabits(originalHabits) };
+      }
+    }
+
     draggingHabitId = null;
     dragPointerId = null;
     dragCandidate = null;
     dragActive = false;
+    dragOriginalHabits = null;
     dragPreviewName = '';
   }
 
@@ -611,7 +618,7 @@
 
     event.preventDefault();
     dragPreviewTop = event.clientY - dragCandidate.offsetY;
-    updateDropIndex(event.clientY);
+    updateLiveHabitOrder(event.clientY);
   }
 
   function onHabitDragEnd(event: PointerEvent) {
@@ -626,6 +633,9 @@
 
   function startHabitDrag(event: PointerEvent, habitId: string) {
     if (!board || event.button !== 0 || editingHabitId === habitId) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('.habit-controls, input')) return;
+
     const cell = event.currentTarget as HTMLElement;
     const rect = cell.getBoundingClientRect();
     dragPointerId = event.pointerId;
@@ -848,8 +858,7 @@
               <tr
                 data-habit-id={habit.id}
                 class:dragging={dragActive && draggingHabitId === habit.id}
-                class:drop-before={dragActive && dropBeforeHabitId() === habit.id}
-                class:drop-after={dragActive && dropAfterHabitId() === habit.id}
+                animate:flip={{ duration: 110 }}
               >
                 <th
                   class="habit-name"
@@ -890,7 +899,6 @@
                     class:today={date.key === todayKey}
                     class:enrolled={date.key === enrolledKey}
                     class:prestart={prestart}
-                    class:habitstart={date.key === habitStartKey(habit)}
                     class:locked={!editable && !prestart}
                   >
                     <button
@@ -905,7 +913,7 @@
                       }}
                       onclick={(event) => {
                         if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}>{prestart ? '' : symbols[value]}</button>
+                      }}>{symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
@@ -947,7 +955,6 @@
     aria-hidden="true"
   >
     <span>{dragPreviewName}</span>
-    <span class="drag-preview-controls">↑ &nbsp; ↓ &nbsp; ×</span>
   </div>
 {/if}
 
@@ -1068,7 +1075,7 @@
   }
   th, td {
     padding: 0;
-    border-bottom: 1px solid #d8d8d1;
+    border-bottom: 1px solid #e1e1dc;
   }
   tbody tr:not(.add-row) > th,
   tbody tr:not(.add-row) > td {
@@ -1090,7 +1097,7 @@
     max-width: var(--day-size);
   }
   thead th.day-head,
-  tbody td { border-left: 1px solid #ecece7; }
+  tbody td { border-left: 1px solid #e9e9e4; }
   thead th span,
   thead th strong { display: block; font-weight: 400; line-height: 1.2; }
   thead th strong { font-size: 11px; }
@@ -1109,7 +1116,7 @@
   }
   .habit-head { z-index: 8; }
   .habit-name {
-    padding: 0 8px 0 2px;
+    padding: 0 8px 0 16px;
     text-align: left;
     font-size: 12px;
     font-weight: 400;
@@ -1160,29 +1167,22 @@
   }
   .habit-name:active { cursor: grabbing; }
   tr.dragging > th,
-  tr.dragging > td { opacity: .18; }
-  tr.drop-before > th,
-  tr.drop-before > td { box-shadow: inset 0 3px #11110f; }
-  tr.drop-after > th,
-  tr.drop-after > td { box-shadow: inset 0 -3px #11110f; }
+  tr.dragging > td { opacity: .08; }
   .habit-drag-preview {
     position: fixed;
     z-index: 250;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 0 10px 0 8px;
+    padding: 0 10px 0 var(--page-inset);
     background: #fffffc;
     border: 1px solid #c8c8c1;
     box-shadow: 0 10px 28px rgba(17,17,15,.16);
     font-size: 12px;
     font-weight: 550;
     pointer-events: none;
-    transform: scale(1.02);
+    transform: scale(1.015);
     transform-origin: center;
   }
-  .drag-preview-controls { font-size: 15px; font-weight: 650; opacity: .5; white-space: nowrap; }
   .habit-inline-input {
     flex: 1;
     min-width: 0;
@@ -1217,8 +1217,7 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: rgba(17,17,15,.05); }
-  .enrolled,
-  td.habitstart { border-left: 1px solid #a9a9a1 !important; }
+  .enrolled { border-left: 1px solid #9f9f97 !important; }
   td.prestart { background: rgba(17,17,15,.012); }
   td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
@@ -1236,7 +1235,7 @@
   .cell.plus { font-weight: 750; font-size: 17px; }
   .cell:disabled { color: inherit; }
   td.locked .cell { opacity: .58; }
-  td.prestart .cell { opacity: 0; }
+  td.prestart .cell { opacity: .26; }
   td.today .cell { opacity: 1; }
   td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .42; }
   .cell:not(:disabled):active { background: rgba(17,17,15,.07); }
@@ -1260,7 +1259,7 @@
     header { margin-bottom: 2px; padding: 0 10px; }
     .timeline-toolbar { min-height: 22px; }
     .timeline-toolbar-meta { padding-left: 7px; }
-    .habit-name { padding-right: 2px; }
+    .habit-name { padding-left: 10px; padding-right: 2px; }
     .habit-controls button { width: 27px; height: 42px; font-size: 17px; }
     .habit-controls .delete-habit { font-size: 20px; }
     thead th { height: 34px; }
