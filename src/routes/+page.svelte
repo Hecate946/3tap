@@ -62,6 +62,9 @@
   let dragPreviewTop = 0;
   let dragPreviewWidth = 0;
   let dragPreviewHeight = 0;
+  let dragMoveRaf = 0;
+  let dragPendingY: number | null = null;
+  let dragLastClientY: number | null = null;
 
   const entries = new SvelteMap<string, Entry>();
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
@@ -546,34 +549,55 @@
     dragPreviewWidth = rect.width;
     dragPreviewHeight = rect.height;
     dragPreviewTop = event.clientY - dragCandidate.offsetY;
+    dragLastClientY = dragCandidate.startY;
+    document.documentElement.classList.add('habit-dragging-cursor');
     window.addEventListener('click', blockDragClick, true);
   }
 
   function updateLiveHabitOrder(clientY: number) {
-    if (!board || !draggingHabitId) return;
+    if (!board || !draggingHabitId || !dragCandidate) return;
 
     const currentIndex = board.habits.findIndex((habit) => habit.id === draggingHabitId);
     if (currentIndex < 0) return;
 
-    const otherRows = [...document.querySelectorAll<HTMLTableRowElement>('tr[data-habit-id]')]
-      .filter((row) => row.dataset.habitId !== draggingHabitId);
+    const previousY = dragLastClientY ?? clientY;
+    const movingUp = clientY < previousY;
+    const movingDown = clientY > previousY;
+    dragLastClientY = clientY;
+    if (!movingUp && !movingDown) return;
 
-    const remaining = board.habits.filter((habit) => habit.id !== draggingHabitId);
-    let targetIndex = remaining.length;
+    const previewTop = clientY - dragCandidate.offsetY;
+    const previewBottom = previewTop + dragPreviewHeight;
+    let targetIndex = currentIndex;
 
-    for (let index = 0; index < otherRows.length; index += 1) {
-      const rect = otherRows[index].getBoundingClientRect();
-      if (clientY < rect.top + rect.height / 2) {
-        targetIndex = index;
-        break;
+    // Edge-crossing reorder: there is deliberately no 50%/center threshold.
+    // Moving up: the instant the floating row's top edge overlaps the row above,
+    // that slot opens. Moving down: same rule using the bottom edge.
+    if (movingUp) {
+      for (let index = currentIndex - 1; index >= 0; index -= 1) {
+        const habit = board.habits[index];
+        const row = document.querySelector<HTMLTableRowElement>(`tr[data-habit-id="${habit.id}"]`);
+        if (!row) continue;
+        const rect = row.getBoundingClientRect();
+        if (previewTop < rect.bottom) targetIndex = index;
+        else break;
+      }
+    } else if (movingDown) {
+      for (let index = currentIndex + 1; index < board.habits.length; index += 1) {
+        const habit = board.habits[index];
+        const row = document.querySelector<HTMLTableRowElement>(`tr[data-habit-id="${habit.id}"]`);
+        if (!row) continue;
+        const rect = row.getBoundingClientRect();
+        if (previewBottom > rect.top) targetIndex = index;
+        else break;
       }
     }
 
-    const dragged = board.habits[currentIndex];
-    const next = [...remaining];
+    if (targetIndex === currentIndex) return;
+
+    const next = [...board.habits];
+    const [dragged] = next.splice(currentIndex, 1);
     next.splice(targetIndex, 0, dragged);
-    const nextIndex = next.findIndex((habit) => habit.id === draggingHabitId);
-    if (nextIndex === currentIndex) return;
 
     // Reorder locally only. The server is updated once, on release.
     board = { ...board, habits: normalizeHabits(next) };
@@ -590,6 +614,11 @@
     window.removeEventListener('pointermove', onHabitDragMove);
     window.removeEventListener('pointerup', onHabitDragEnd);
     window.removeEventListener('pointercancel', onHabitDragCancel);
+    document.documentElement.classList.remove('habit-dragging-cursor');
+    if (dragMoveRaf) cancelAnimationFrame(dragMoveRaf);
+    dragMoveRaf = 0;
+    dragPendingY = null;
+    dragLastClientY = null;
     if (dragActive) setTimeout(() => window.removeEventListener('click', blockDragClick, true), 0);
     else window.removeEventListener('click', blockDragClick, true);
 
@@ -617,12 +646,33 @@
     if (!dragActive) return;
 
     event.preventDefault();
-    dragPreviewTop = event.clientY - dragCandidate.offsetY;
-    updateLiveHabitOrder(event.clientY);
+    dragPendingY = event.clientY;
+    if (dragMoveRaf) return;
+
+    dragMoveRaf = requestAnimationFrame(() => {
+      dragMoveRaf = 0;
+      if (!dragActive || !dragCandidate || dragPendingY === null) return;
+      const clientY = dragPendingY;
+      dragPendingY = null;
+      dragPreviewTop = clientY - dragCandidate.offsetY;
+      updateLiveHabitOrder(clientY);
+    });
   }
 
   function onHabitDragEnd(event: PointerEvent) {
     if (dragPointerId !== null && event.pointerId !== dragPointerId) return;
+
+    // Apply the latest pointer position before committing, even if the browser
+    // has not painted the queued animation frame yet.
+    if (dragActive && dragCandidate && dragPendingY !== null) {
+      if (dragMoveRaf) cancelAnimationFrame(dragMoveRaf);
+      dragMoveRaf = 0;
+      const clientY = dragPendingY;
+      dragPendingY = null;
+      dragPreviewTop = clientY - dragCandidate.offsetY;
+      updateLiveHabitOrder(clientY);
+    }
+
     cleanupHabitDrag(true);
   }
 
@@ -858,7 +908,7 @@
               <tr
                 data-habit-id={habit.id}
                 class:dragging={dragActive && draggingHabitId === habit.id}
-                animate:flip={{ duration: 110 }}
+                animate:flip={{ duration: 120 }}
               >
                 <th
                   class="habit-name"
@@ -993,10 +1043,14 @@
   }
   :global(button), :global(input), :global(textarea) { font: inherit; }
   :global(button) { color: inherit; }
+  :global(html.habit-dragging-cursor),
+  :global(html.habit-dragging-cursor *) { cursor: grabbing !important; }
 
   .shell {
     --habit-width: 224px;
     --day-size: 48px;
+    --grid-weak: #e3e3de;
+    --grid-strong: #aaa9a2;
     min-height: 100dvh;
     padding: max(14px, env(safe-area-inset-top)) 0 max(18px, env(safe-area-inset-bottom));
   }
@@ -1075,11 +1129,11 @@
   }
   th, td {
     padding: 0;
-    border-bottom: 1px solid #e1e1dc;
   }
   tbody tr:not(.add-row) > th,
   tbody tr:not(.add-row) > td {
     height: var(--day-size);
+    border-bottom: 1px solid var(--grid-weak);
   }
   thead th {
     height: 34px;
@@ -1089,6 +1143,7 @@
     opacity: .5;
     text-align: center;
     background: transparent;
+    border-bottom: 1px solid var(--grid-strong);
   }
   thead th.day-head,
   td {
@@ -1096,8 +1151,14 @@
     min-width: var(--day-size);
     max-width: var(--day-size);
   }
+  /* One owner per vertical boundary: day cells draw their left separator. */
   thead th.day-head,
-  tbody td { border-left: 1px solid #e9e9e4; }
+  tbody td { border-left: 1px solid var(--grid-weak); }
+
+  /* The sticky habit/timeline split owns this boundary, so suppress the
+     adjacent first date separator to avoid a doubled line. */
+  thead .habit-head + .day-head,
+  tbody .habit-name + td { border-left-color: transparent; }
   thead th span,
   thead th strong { display: block; font-weight: 400; line-height: 1.2; }
   thead th strong { font-size: 11px; }
@@ -1112,7 +1173,7 @@
     min-width: var(--habit-width);
     max-width: var(--habit-width);
     background: #f7f7f5;
-    border-right: 1px solid #d6d6cf;
+    border-right: 1px solid var(--grid-strong);
   }
   .habit-head { z-index: 8; }
   .habit-name {
@@ -1182,6 +1243,7 @@
     pointer-events: none;
     transform: scale(1.015);
     transform-origin: center;
+    will-change: top, transform;
   }
   .habit-inline-input {
     flex: 1;
@@ -1198,8 +1260,7 @@
   }
   .add-habit-cell {
     height: 38px;
-    border-bottom: 0;
-    border-right-color: transparent;
+    border: 0;
     background: #f7f7f5;
   }
   .add-row .add-spacer {
@@ -1217,7 +1278,8 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: rgba(17,17,15,.05); }
-  .enrolled { border-left: 1px solid #9f9f97 !important; }
+  /* The only strong date divider: when tracking began. */
+  .enrolled { border-left-color: var(--grid-strong); }
   td.prestart { background: rgba(17,17,15,.012); }
   td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
