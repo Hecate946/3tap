@@ -22,6 +22,7 @@
   let loading = true;
   let online = true;
   let menuOpen = false;
+  let theme: 'light' | 'dark' = 'light';
   let panel: 'none' | 'pair' | 'recovery' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
@@ -788,6 +789,21 @@
     }, next.getTime() - now.getTime());
   }
 
+  function applyTheme(next: 'light' | 'dark') {
+    theme = next;
+    document.documentElement.dataset.theme = next;
+    document.documentElement.style.colorScheme = next;
+    localStorage.setItem('3tap.theme', next);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute(
+      'content',
+      next === 'dark' ? '#111210' : '#f7f7f5'
+    );
+  }
+
+  function toggleTheme() {
+    applyTheme(theme === 'dark' ? 'light' : 'dark');
+  }
+
   async function initialize() {
     online = navigator.onLine;
     credentials = getCredentials();
@@ -812,6 +828,7 @@
   }
 
   onMount(() => {
+    theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
     void initialize();
 
     const onFocus = () => void sync();
@@ -859,19 +876,46 @@
 </svelte:head>
 
 <div class="shell">
-  <header>
+  <header class="navbar">
     <div class="brand">3tap</div>
-    <div class="header-right">
-      {#if !online}<span class="offline">offline</span>{/if}
-      <button class="menu-button" aria-label="Menu" onclick={() => (menuOpen = !menuOpen)}>···</button>
-      {#if menuOpen}
-        <div class="menu">
-          <button onclick={openPair}>add device</button>
-          <button onclick={openRecovery}>recovery</button>
-          <button onclick={exportData}>export</button>
-        </div>
-      {/if}
-    </div>
+    <nav class="nav-actions" aria-label="App controls">
+      {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+      <button
+        class="nav-icon theme-button"
+        aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
+        aria-pressed={theme === 'dark'}
+        title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+        onclick={toggleTheme}
+      >
+        {#if theme === 'dark'}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.5"></circle>
+            <path d="M12 2v2.25M12 19.75V22M4.93 4.93l1.59 1.59M17.48 17.48l1.59 1.59M2 12h2.25M19.75 12H22M4.93 19.07l1.59-1.59M17.48 6.52l1.59-1.59"></path>
+          </svg>
+        {:else}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20.2 15.15A8.35 8.35 0 0 1 8.85 3.8 8.4 8.4 0 1 0 20.2 15.15Z"></path>
+          </svg>
+        {/if}
+      </button>
+      <div class="menu-wrap">
+        <button
+          class="nav-icon menu-button"
+          aria-label="More options"
+          aria-expanded={menuOpen}
+          onclick={() => (menuOpen = !menuOpen)}
+        >
+          <span aria-hidden="true">···</span>
+        </button>
+        {#if menuOpen}
+          <div class="menu">
+            <button onclick={openPair}>add device</button>
+            <button onclick={openRecovery}>recovery</button>
+            <button onclick={exportData}>export</button>
+          </div>
+        {/if}
+      </div>
+    </nav>
   </header>
 
   {#if board}
@@ -1033,11 +1077,45 @@
 
 <style>
   :global(*) { box-sizing: border-box; }
-  :global(html) { background: #f7f7f5; color-scheme: light; }
+  :global(html) {
+    --bg: #f7f7f5;
+    --surface: #fffffc;
+    --text: #11110f;
+    --muted: #6e6e68;
+    --grid-weak-theme: #e3e3de;
+    --grid-strong-theme: #aaa9a2;
+    --border: #d8d8d2;
+    --panel-border: #d6d6d0;
+    --hover: #ecece7;
+    --today-fill: rgba(17,17,15,.05);
+    --prestart-fill: rgba(17,17,15,.012);
+    --press-fill: rgba(17,17,15,.07);
+    --backdrop: rgba(17,17,15,.18);
+    --shadow: rgba(17,17,15,.16);
+    background: var(--bg);
+    color-scheme: light;
+  }
+  :global(html[data-theme='dark']) {
+    --bg: #111210;
+    --surface: #181916;
+    --text: #ecece6;
+    --muted: #969790;
+    --grid-weak-theme: #2a2b28;
+    --grid-strong-theme: #62635d;
+    --border: #393a36;
+    --panel-border: #444540;
+    --hover: #20211e;
+    --today-fill: rgba(255,255,248,.07);
+    --prestart-fill: rgba(255,255,248,.018);
+    --press-fill: rgba(255,255,248,.09);
+    --backdrop: rgba(0,0,0,.5);
+    --shadow: rgba(0,0,0,.42);
+    color-scheme: dark;
+  }
   :global(body) {
     margin: 0;
-    background: #f7f7f5;
-    color: #11110f;
+    background: var(--bg);
+    color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     -webkit-font-smoothing: antialiased;
   }
@@ -1049,35 +1127,89 @@
   .shell {
     --habit-width: 224px;
     --day-size: 48px;
-    --grid-weak: #e3e3de;
-    --grid-strong: #aaa9a2;
+    --grid-weak: var(--grid-weak-theme);
+    --grid-strong: var(--grid-strong-theme);
+    --page-inset: clamp(10px, 1.25vw, 16px);
     min-height: 100dvh;
     padding: max(14px, env(safe-area-inset-top)) 0 max(18px, env(safe-area-inset-bottom));
   }
-  header {
-    height: 28px;
+  .navbar {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 40;
+    min-height: 38px;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
-    max-width: 100%;
-    margin-bottom: 4px;
-    padding: 0 16px;
+    gap: 12px;
+    width: 100%;
+    margin-bottom: 2px;
+    padding: 0 var(--page-inset);
+    background: var(--bg);
   }
-  .brand { font-size: 12px; letter-spacing: .08em; text-transform: lowercase; opacity: .48; }
-  .header-right { position: relative; display: flex; align-items: center; gap: 10px; }
-  .offline { font-size: 10px; opacity: .4; }
+  .brand {
+    flex: none;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: lowercase;
+    opacity: .5;
+  }
+  .nav-actions {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+  }
+  .offline { margin-right: 6px; font-size: 10px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
-  .menu-button { width: 36px; height: 28px; font-size: 17px; line-height: 1; text-align: right; }
-  .menu {
-    position: absolute; z-index: 20; top: 30px; right: 0; min-width: 132px;
-    background: #f7f7f5; border: 1px solid #d8d8d2; padding: 5px;
-    box-shadow: 0 8px 24px rgba(0,0,0,.06);
+  .nav-icon {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 5px;
+    color: var(--text);
+    opacity: .6;
+    -webkit-tap-highlight-color: transparent;
   }
-  .menu button { display: block; width: 100%; padding: 8px 9px; text-align: left; font-size: 12px; }
+  .nav-icon svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.55;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .menu-wrap { position: relative; flex: none; }
+  .menu-button { font-size: 17px; line-height: 1; letter-spacing: .08em; }
+  .menu-button span { transform: translateY(-2px); }
+  .menu {
+    position: absolute;
+    z-index: 30;
+    top: 36px;
+    right: 0;
+    min-width: 136px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 4px;
+    box-shadow: 0 8px 24px var(--shadow);
+  }
+  .menu button {
+    display: block;
+    width: 100%;
+    min-height: 34px;
+    padding: 0 9px;
+    text-align: left;
+    color: var(--text);
+    font-size: 11px;
+  }
   @media (hover: hover) and (pointer: fine) {
-    .menu button:hover { background: #ecece7; }
+    .nav-icon:hover { background: var(--hover); opacity: .9; }
+    .menu button:hover { background: var(--hover); }
     .habit-controls button:not(:disabled):hover { opacity: .9; }
-    .cell:not(:disabled):hover { background: rgba(17,17,15,.03); }
+    .cell:not(:disabled):hover { background: var(--hover); }
     .today-button:hover { opacity: .9; }
   }
 
@@ -1098,7 +1230,7 @@
     justify-content: space-between;
     gap: 12px;
     padding: 0 4px 0 10px;
-    color: #6e6e68;
+    color: var(--muted);
     font-size: 10px;
     letter-spacing: .06em;
   }
@@ -1106,7 +1238,7 @@
   .today-button {
     min-height: 24px;
     padding: 0 2px;
-    color: #11110f;
+    color: var(--text);
     font-size: 10px;
     opacity: .52;
     white-space: nowrap;
@@ -1172,12 +1304,12 @@
     width: var(--habit-width);
     min-width: var(--habit-width);
     max-width: var(--habit-width);
-    background: #f7f7f5;
+    background: var(--bg);
     border-right: 1px solid var(--grid-strong);
   }
   .habit-head { z-index: 8; }
   .habit-name {
-    padding: 0 8px 0 16px;
+    padding: 0 8px 0 var(--page-inset);
     text-align: left;
     font-size: 12px;
     font-weight: 400;
@@ -1235,9 +1367,9 @@
     display: flex;
     align-items: center;
     padding: 0 10px 0 var(--page-inset);
-    background: #fffffc;
-    border: 1px solid #c8c8c1;
-    box-shadow: 0 10px 28px rgba(17,17,15,.16);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 28px var(--shadow);
     font-size: 12px;
     font-weight: 550;
     pointer-events: none;
@@ -1250,7 +1382,7 @@
     min-width: 0;
     height: 30px;
     border: 0;
-    border-bottom: 1px solid #aaa9a2;
+    border-bottom: 1px solid var(--grid-strong);
     border-radius: 0;
     outline: none;
     background: transparent;
@@ -1261,7 +1393,7 @@
   .add-habit-cell {
     height: 38px;
     border: 0;
-    background: #f7f7f5;
+    background: var(--bg);
   }
   .add-row .add-spacer {
     height: 38px;
@@ -1277,10 +1409,10 @@
   }
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
-  .today { background: rgba(17,17,15,.05); }
+  .today { background: var(--today-fill); }
   /* The only strong date divider: when tracking began. */
   .enrolled { border-left-color: var(--grid-strong); }
-  td.prestart { background: rgba(17,17,15,.012); }
+  td.prestart { background: var(--prestart-fill); }
   td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
   thead th.prestart { opacity: .26; }
@@ -1300,15 +1432,15 @@
   td.prestart .cell { opacity: .26; }
   td.today .cell { opacity: 1; }
   td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .42; }
-  .cell:not(:disabled):active { background: rgba(17,17,15,.07); }
+  .cell:not(:disabled):active { background: var(--press-fill); }
 
-  .backdrop { position: fixed; z-index: 100; inset: 0; background: rgba(17,17,15,.18); display: grid; place-items: center; padding: 18px; }
-  .panel { position: relative; width: min(390px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: #f7f7f5; border: 1px solid #d6d6d0; padding: 24px; }
+  .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
+  .panel { position: relative; width: min(390px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 24px; }
   .panel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: lowercase; }
-  .panel p { margin: 0 0 18px; color: #686862; font-size: 11px; line-height: 1.5; }
+  .panel p { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.5; }
   .close { position: absolute; top: 12px; right: 14px; font-size: 18px; opacity: .5; }
   .qr { display: block; width: min(280px, 100%); margin: 16px auto 20px; image-rendering: pixelated; }
-  .action { border: 1px solid #11110f; padding: 9px 12px; font-size: 11px; }
+  .action { border: 1px solid var(--text); padding: 9px 12px; font-size: 11px; }
   .text-button { font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
   textarea { resize: vertical; padding: 9px; font-size: 10px; line-height: 1.4; margin-bottom: 14px; }
   .panel-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
@@ -1318,10 +1450,11 @@
       --habit-width: 190px;
       --day-size: 48px;
     }
-    header { margin-bottom: 2px; padding: 0 10px; }
+    .navbar { min-height: 36px; }
+    .nav-icon { width: 32px; height: 32px; }
     .timeline-toolbar { min-height: 22px; }
     .timeline-toolbar-meta { padding-left: 7px; }
-    .habit-name { padding-left: 10px; padding-right: 2px; }
+    .habit-name { padding-left: var(--page-inset); padding-right: 2px; }
     .habit-controls button { width: 27px; height: 42px; font-size: 17px; }
     .habit-controls .delete-habit { font-size: 20px; }
     thead th { height: 34px; }
