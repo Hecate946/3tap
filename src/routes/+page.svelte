@@ -24,10 +24,14 @@
   let menuOpen = false;
   let theme: 'light' | 'dark' = 'light';
   let navScrolled = false;
-  let panel: 'none' | 'pair' | 'recovery' = 'none';
+  let panel: 'none' | 'pair' | 'recovery' | 'archived' | 'delete' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
   let recoveryInput = '';
+  let archiveToast: { habit: Habit; index: number } | null = null;
+  let archiveToastTimer: ReturnType<typeof setTimeout> | undefined;
+  let deleteHabitTarget: Habit | null = null;
+  let deletingHabit = false;
   let editingHabitId: string | null = null;
   let editingHabitName = '';
   let addingHabit = false;
@@ -36,8 +40,6 @@
   let newHabitInput: HTMLInputElement;
   let pendingHabitSave: Habit[] | null = null;
   let scroller: HTMLDivElement;
-  let bottomScroller: HTMLDivElement;
-  let bottomScrollWidth = 0;
   let currentDay = new Date();
   let windowEndOffset = 0;
   let visibleMonthLabel = '';
@@ -47,6 +49,7 @@
   const WINDOW_DAYS = 84;
   const WINDOW_SHIFT = 28;
   let minimumVisibleDays = 32;
+  let historyIntroWidth = 0;
   const pendingByCell = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setInterval> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -111,17 +114,15 @@
     return Math.floor((toUtc - fromUtc) / 86_400_000);
   }
 
-  function placeholderDaysBeforeEnrollment(source: Board | null) {
+  function realHistoryDays(source: Board | null) {
     const start = enrollmentDate(source);
-    if (!start) return minimumVisibleDays;
+    if (!start) return 0;
     const today = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
-    const realDays = Math.max(1, calendarDayDistance(start, today) + 1);
-    return Math.max(0, minimumVisibleDays - realDays);
+    return Math.max(1, calendarDayDistance(start, today) + 1);
   }
 
   function earliestTimelineKey(source: Board | null) {
-    const start = enrollmentDate(source);
-    return start ? dateKey(shiftedDate(start, -placeholderDaysBeforeEnrollment(source))) : '';
+    return enrollmentKey(source);
   }
 
   function datesForWindow(source: Board | null, endDay: Date, endOffset: number): DayColumn[] {
@@ -282,7 +283,9 @@
     }
 
     const remoteBoard: Board = await response.json();
-    board = pendingHabitSave ? { ...remoteBoard, habits: pendingHabitSave } : remoteBoard;
+    board = pendingHabitSave
+      ? { ...remoteBoard, habits: pendingHabitSave, archivedHabits: board?.archivedHabits ?? remoteBoard.archivedHabits }
+      : remoteBoard;
     hydrateEntries(board);
     for (const change of pendingChanges()) applyLocalEntry(change);
     persistLocalStateNow();
@@ -378,26 +381,19 @@
     return true;
   }
 
-  function updateBottomScrollbar() {
-    if (!scroller) return;
-    bottomScrollWidth = scroller.scrollWidth;
-    if (!bottomScroller) return;
-
-    const syncPosition = () => {
-      if (bottomScroller && scroller && Math.abs(bottomScroller.scrollLeft - scroller.scrollLeft) > 0.5) {
-        bottomScroller.scrollLeft = scroller.scrollLeft;
-      }
-    };
-
-    syncPosition();
-    requestAnimationFrame(syncPosition);
-  }
-
-  function onBottomTimelineScroll() {
-    if (!scroller || !bottomScroller) return;
-    if (Math.abs(scroller.scrollLeft - bottomScroller.scrollLeft) > 0.5) {
-      scroller.scrollLeft = bottomScroller.scrollLeft;
+  function updateHistoryIntroWidth() {
+    if (!scroller || !board || windowEndOffset !== 0) {
+      historyIntroWidth = 0;
+      return false;
     }
+    const metrics = timelineMetrics();
+    if (!metrics || metrics.dayWidth <= 0) return false;
+    const timelineWidth = Math.max(0, scroller.clientWidth - metrics.habitWidth);
+    const historyWidth = realHistoryDays(board) * metrics.dayWidth;
+    const next = Math.max(0, Math.round(timelineWidth - historyWidth));
+    if (Math.abs(next - historyIntroWidth) < 1) return false;
+    historyIntroWidth = next;
+    return true;
   }
 
   function updateTimelineStatus() {
@@ -406,7 +402,7 @@
     if (!metrics) return;
 
     const timelineWidth = Math.max(0, scroller.clientWidth - metrics.habitWidth);
-    const centerInTimeline = scroller.scrollLeft + timelineWidth / 2;
+    const centerInTimeline = scroller.scrollLeft + timelineWidth / 2 - historyIntroWidth;
     const index = Math.max(0, Math.min(dates.length - 1, Math.floor(centerInTimeline / metrics.dayWidth)));
     const date = dates[index];
     visibleMonthLabel = `${date.month} ${date.year}`;
@@ -417,7 +413,7 @@
 
   function scrollAnchor(metrics: { dayWidth: number; habitWidth: number }) {
     if (!scroller || !dates.length) return null;
-    const timelineLeft = Math.max(0, scroller.scrollLeft - metrics.habitWidth);
+    const timelineLeft = Math.max(0, scroller.scrollLeft - metrics.habitWidth - historyIntroWidth);
     const index = Math.max(0, Math.min(dates.length - 1, Math.floor(timelineLeft / metrics.dayWidth)));
     return {
       key: dates[index].key,
@@ -434,10 +430,9 @@
     if (anchor) {
       const nextIndex = dates.findIndex((date) => date.key === anchor.key);
       if (nextIndex >= 0) {
-        scroller.scrollLeft = metrics.habitWidth + nextIndex * metrics.dayWidth + anchor.offset;
+        scroller.scrollLeft = metrics.habitWidth + historyIntroWidth + nextIndex * metrics.dayWidth + anchor.offset;
       }
     }
-    updateBottomScrollbar();
   }
 
   async function maintainTimelineWindow() {
@@ -466,9 +461,6 @@
   }
 
   function onTimelineScroll() {
-    if (bottomScroller && scroller && Math.abs(bottomScroller.scrollLeft - scroller.scrollLeft) > 0.5) {
-      bottomScroller.scrollLeft = scroller.scrollLeft;
-    }
     if (scrollRaf) return;
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = 0;
@@ -520,10 +512,10 @@
     windowEndOffset = 0;
     await tick();
     if (updateMinimumVisibleDays()) await tick();
+    if (updateHistoryIntroWidth()) await tick();
     if (scroller) {
       scroller.scrollLeft = scroller.scrollWidth;
-      updateBottomScrollbar();
-      updateTimelineStatus();
+        updateTimelineStatus();
     }
   }
 
@@ -581,7 +573,14 @@
 
         if (pendingHabitSave === sent) {
           pendingHabitSave = null;
-          if (board) board = { ...board, habits: saved.habits, updatedAt: saved.updatedAt };
+          if (board) {
+            board = {
+              ...board,
+              habits: saved.habits,
+              archivedHabits: saved.archivedHabits ?? [],
+              updatedAt: saved.updatedAt
+            };
+          }
           schedulePersistence();
         }
         online = true;
@@ -591,6 +590,7 @@
         habitFlushPromise = null;
         if (pendingHabitSave && navigator.onLine) {
           if (habitFlushTimer) clearTimeout(habitFlushTimer);
+      if (archiveToastTimer) clearTimeout(archiveToastTimer);
           habitFlushTimer = setTimeout(() => {
             habitFlushTimer = undefined;
             void flushHabitChanges();
@@ -803,14 +803,89 @@
     window.addEventListener('pointercancel', onHabitDragCancel);
   }
 
-  function removeHabit(index: number) {
+  function undoArchiveToast() {
+    if (!archiveToast) return;
+    restoreArchivedHabit(archiveToast.habit, archiveToast.index);
+  }
+
+  function showArchiveToast(habit: Habit, index: number) {
+    if (archiveToastTimer) clearTimeout(archiveToastTimer);
+    archiveToast = { habit, index };
+    archiveToastTimer = setTimeout(() => {
+      archiveToast = null;
+      archiveToastTimer = undefined;
+    }, 8000);
+  }
+
+  function archiveHabit(index: number) {
     if (!board) return;
     const removed = board.habits[index];
     if (!removed) return;
-    const prefix = `${removed.id}\u0000`;
-    for (const key of pendingByCell.keys()) if (key.startsWith(prefix)) pendingByCell.delete(key);
-    for (const key of entries.keys()) if (key.startsWith(prefix)) entries.delete(key);
+
+    const archived = { ...removed, archivedAt: new Date().toISOString() };
+    board = {
+      ...board,
+      archivedHabits: [archived, ...(board.archivedHabits ?? []).filter((habit) => habit.id !== removed.id)]
+    };
     setLocalHabits(board.habits.filter((_, i) => i !== index));
+    showArchiveToast(archived, index);
+  }
+
+  function restoreArchivedHabit(habit: Habit, preferredIndex?: number) {
+    if (!board) return;
+    const archivedHabits = (board.archivedHabits ?? []).filter((item) => item.id !== habit.id);
+    const restored = { ...habit, archivedAt: undefined };
+    const active = [...board.habits];
+    const index = Math.max(0, Math.min(preferredIndex ?? active.length, active.length));
+    active.splice(index, 0, restored);
+    board = { ...board, archivedHabits };
+    setLocalHabits(active);
+
+    if (archiveToast?.habit.id === habit.id) {
+      archiveToast = null;
+      if (archiveToastTimer) clearTimeout(archiveToastTimer);
+      archiveToastTimer = undefined;
+    }
+  }
+
+  function openArchived() {
+    menuOpen = false;
+    panel = 'archived';
+  }
+
+  function confirmPermanentDelete(habit: Habit) {
+    deleteHabitTarget = habit;
+    panel = 'delete';
+  }
+
+  function archivedHistoryDays(habit: Habit) {
+    if (!habit.createdAt) return 0;
+    const start = new Date(habit.createdAt);
+    const end = habit.archivedAt ? new Date(habit.archivedAt) : new Date();
+    const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 12);
+    const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 12);
+    return Math.max(1, calendarDayDistance(startDay, endDay) + 1);
+  }
+
+  async function deleteHabitForever() {
+    if (!credentials || !board || !deleteHabitTarget || deletingHabit) return;
+    deletingHabit = true;
+    try {
+      const response = await fetch(`/api/boards/${credentials.boardId}/habits/${deleteHabitTarget.id}`, {
+        method: 'DELETE',
+        headers: authHeaders(credentials)
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const saved: Board = await response.json();
+      board = saved;
+      hydrateEntries(board);
+      pendingHabitSave = null;
+      deleteHabitTarget = null;
+      panel = 'archived';
+      persistLocalStateNow();
+    } finally {
+      deletingHabit = false;
+    }
   }
 
   async function beginAddHabit() {
@@ -939,12 +1014,9 @@
     const onVisibility = () => document.visibilityState === 'visible' && void sync();
     const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
     const onResize = () => {
-      const changed = updateMinimumVisibleDays();
-      if (windowEndOffset === 0 || changed) void scrollToToday();
-      else {
-        updateTimelineStatus();
-        void tick().then(updateBottomScrollbar);
-      }
+      updateMinimumVisibleDays();
+      updateHistoryIntroWidth();
+      updateTimelineStatus();
     };
     const onPageHide = () => {
       persistLocalStateNow();
@@ -977,6 +1049,7 @@
       if (flushTimer) clearTimeout(flushTimer);
       if (persistTimer) clearTimeout(persistTimer);
       if (habitFlushTimer) clearTimeout(habitFlushTimer);
+      if (archiveToastTimer) clearTimeout(archiveToastTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       cleanupHabitDrag(false);
       cleanupTimelinePan();
@@ -1024,6 +1097,7 @@
         {#if menuOpen}
           <div class="menu">
             <button onclick={openPair}>add device</button>
+            <button onclick={openArchived}>archived{#if (board?.archivedHabits?.length ?? 0) > 0}<span class="menu-count">{board?.archivedHabits?.length}</span>{/if}</button>
             <button onclick={openRecovery}>recovery</button>
             <button onclick={exportData}>export</button>
           </div>
@@ -1056,6 +1130,13 @@
           <thead>
             <tr>
               <th class="habit-head"></th>
+              {#if historyIntroWidth > 0}
+                <th
+                  class="history-intro-head"
+                  style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
+                  aria-hidden="true"
+                ></th>
+              {/if}
               {#each dates as date (date.key)}
                 <th
                   class="day-head"
@@ -1103,10 +1184,24 @@
                     <div class="habit-controls">
                       <button disabled={habitIndex === 0} aria-label={`Move ${habit.name} up`} onclick={() => moveHabit(habitIndex, -1)}>↑</button>
                       <button disabled={habitIndex === board.habits.length - 1} aria-label={`Move ${habit.name} down`} onclick={() => moveHabit(habitIndex, 1)}>↓</button>
-                      <button class="delete-habit" aria-label={`Remove ${habit.name}`} onclick={() => removeHabit(habitIndex)}>×</button>
+                      <button
+                        class="delete-habit"
+                        aria-label={`Archive ${habit.name}`}
+                        title="Archive"
+                        onclick={() => archiveHabit(habitIndex)}
+                      >×</button>
                     </div>
                   </div>
                 </th>
+                {#if historyIntroWidth > 0}
+                  <td
+                    class="history-intro-row"
+                    style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
+                    aria-hidden="true"
+                  >
+
+                  </td>
+                {/if}
                 {#each dates as date (date.key)}
                   {@const value = valueFor(habit.id, date.key)}
                   {@const prestart = isPreEnrollment(date.key) || isBeforeHabitStart(habit, date.key)}
@@ -1153,26 +1248,37 @@
                   <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
                 {/if}
               </th>
+              {#if historyIntroWidth > 0}
+                <td
+                  class="history-intro-add-spacer"
+                  style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
+                  aria-hidden="true"
+                ></td>
+              {/if}
               <td class="add-spacer" colspan={dates.length}></td>
             </tr>
           </tbody>
         </table>
+        {#if historyIntroWidth > 0}
+          <div
+            class="history-intro-overlay"
+            style={`left:var(--habit-width); width:${historyIntroWidth}px; height:max(calc(var(--day-size) * ${Math.max(board.habits.length, 3)}), calc(var(--day-size) * 3))`}
+            aria-hidden="true"
+          >
+            <div class="history-tutorial">
+              <strong>Your history will appear here over time.</strong>
+              <span>tap today · - → | → +</span>
+              <span>drag habits to reorder</span>
+              <span>past days stay locked</span>
+            </div>
+          </div>
+        {/if}
       </div>
     </main>
   {:else}
     <main aria-busy={loading}></main>
   {/if}
 
-  {#if board}
-    <div
-      class="bottom-scrollbar"
-      bind:this={bottomScroller}
-      onscroll={onBottomTimelineScroll}
-      aria-label="Timeline scrollbar"
-    >
-      <div class="bottom-scrollbar-content" style={`width:${bottomScrollWidth}px`}></div>
-    </div>
-  {/if}
 </div>
 
 {#if dragActive}
@@ -1203,8 +1309,44 @@
           <button class="text-button" onclick={() => copyText(recoveryInput)}>copy</button>
           <button class="action" onclick={useRecoveryCode}>use code</button>
         </div>
+      {:else if panel === 'archived'}
+        <h2>archived</h2>
+        {#if (board?.archivedHabits?.length ?? 0) === 0}
+          <p>no archived habits.</p>
+        {:else}
+          <div class="archived-list">
+            {#each board?.archivedHabits ?? [] as habit (habit.id)}
+              <div class="archived-item">
+                <div class="archived-copy">
+                  <strong>{habit.name}</strong>
+                  <span>{archivedHistoryDays(habit)} days of history</span>
+                </div>
+                <div class="archived-actions">
+                  <button class="text-button" onclick={() => restoreArchivedHabit(habit, habit.position)}>restore</button>
+                  <button class="danger-button" onclick={() => confirmPermanentDelete(habit)}>delete forever</button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {:else if panel === 'delete' && deleteHabitTarget}
+        <h2>delete {deleteHabitTarget.name} forever?</h2>
+        <p>this permanently deletes all {archivedHistoryDays(deleteHabitTarget)} days of history for this habit.</p>
+        <div class="panel-actions">
+          <button class="text-button" onclick={() => (panel = 'archived')}>cancel</button>
+          <button class="danger-button danger-confirm" disabled={deletingHabit} onclick={deleteHabitForever}>
+            {deletingHabit ? 'deleting…' : 'delete forever'}
+          </button>
+        </div>
       {/if}
     </section>
+  </div>
+{/if}
+
+{#if archiveToast}
+  <div class="archive-toast" role="status" aria-live="polite">
+    <span><strong>{archiveToast.habit.name}</strong> archived</span>
+    <button onclick={undoArchiveToast}>undo</button>
   </div>
 {/if}
 
@@ -1226,6 +1368,7 @@
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
+    --danger: #9b332b;
     background: var(--bg);
     color-scheme: light;
   }
@@ -1245,6 +1388,7 @@
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
+    --danger: #e58d82;
     color-scheme: dark;
   }
   :global(body) {
@@ -1262,14 +1406,14 @@
   :global(html.timeline-panning-cursor *) { cursor: grabbing !important; }
 
   .shell {
-    --habit-width: 224px;
     --day-size: 48px;
+    --habit-width: calc(var(--day-size) * 5);
     --line: 1px;
     --grid-weak: var(--grid-weak-theme);
     --grid-strong: var(--grid-strong-theme);
-    --page-inset: clamp(10px, 1.25vw, 16px);
+    --page-inset: 16px;
     min-height: 100dvh;
-    padding: 0 0 calc(18px + env(safe-area-inset-bottom));
+    padding: 0;
   }
   .navbar {
     position: sticky;
@@ -1340,7 +1484,10 @@
     box-shadow: 0 8px 24px var(--shadow);
   }
   .menu button {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     width: 100%;
     min-height: 34px;
     padding: 0 9px;
@@ -1348,6 +1495,7 @@
     color: var(--text);
     font-size: 11px;
   }
+  .menu-count { opacity: .48; font-variant-numeric: tabular-nums; }
   @media (hover: hover) and (pointer: fine) {
     .nav-icon:hover { background: var(--hover); opacity: .9; }
     .menu button:hover { background: var(--hover); }
@@ -1391,6 +1539,7 @@
     white-space: nowrap;
   }
   .grid-scroll {
+    position: relative;
     width: 100%;
     overflow-x: auto;
     overflow-y: hidden;
@@ -1404,7 +1553,7 @@
     border-collapse: separate;
     border-spacing: 0;
     width: max-content;
-    min-width: 100%;
+    min-width: 0;
     table-layout: fixed;
     background: transparent;
   }
@@ -1427,17 +1576,63 @@
     border-bottom: var(--line) solid var(--grid-strong);
   }
   thead th.day-head,
-  td {
+  td:not(.history-intro-row):not(.history-intro-add-spacer) {
     width: var(--day-size);
     min-width: var(--day-size);
     max-width: var(--day-size);
   }
+  .history-intro-head {
+    position: relative;
+    padding: 0;
+    background: var(--bg);
+  }
+  .history-intro-row {
+    position: relative;
+    height: var(--day-size);
+    padding: 0;
+    background: var(--bg);
+    border-bottom-color: transparent !important;
+  }
+  .history-intro-add-spacer {
+    height: var(--day-size);
+    padding: 0;
+    border: 0;
+    background: var(--bg);
+  }
+  .history-intro-overlay {
+    position: absolute;
+    z-index: 4;
+    top: 34px;
+    display: grid;
+    place-items: center;
+    min-height: calc(var(--day-size) * 3);
+    padding: 18px;
+    background: var(--bg);
+    pointer-events: none;
+  }
+  .history-tutorial {
+    display: grid;
+    justify-items: center;
+    gap: 7px;
+    max-width: 340px;
+    color: var(--muted);
+    text-align: center;
+    font-size: 10px;
+    line-height: 1.45;
+    letter-spacing: .01em;
+  }
+  .history-tutorial strong {
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .history-tutorial span { opacity: .7; }
   /* Vertical rules are overlays, not borders, so they always paint above
      horizontal rules at intersections. Every boundary is still exactly 1px. */
   thead th.day-head,
-  tbody td { position: relative; }
+  tbody td:not(.history-intro-row):not(.history-intro-add-spacer) { position: relative; }
   thead th.day-head::before,
-  tbody td::before {
+  tbody td:not(.history-intro-row):not(.history-intro-add-spacer)::before {
     content: '';
     position: absolute;
     z-index: 3;
@@ -1563,12 +1758,12 @@
     font-size: 12px;
   }
   .add-habit-cell {
-    height: 38px;
+    height: var(--day-size);
     border: 0;
     background: var(--bg);
   }
   .add-row .add-spacer {
-    height: 38px;
+    height: var(--day-size);
     border: 0;
     background: transparent;
   }
@@ -1607,23 +1802,6 @@
   td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .42; }
   .cell:not(:disabled):active { background: var(--press-fill); }
 
-  .bottom-scrollbar {
-    position: fixed;
-    z-index: 55;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: calc(15px + env(safe-area-inset-bottom));
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    background: var(--bg);
-    border-top: var(--line) solid var(--grid-weak);
-    scrollbar-width: auto;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  .bottom-scrollbar-content { height: 1px; }
-
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
   .panel { position: relative; width: min(390px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 24px; }
   .panel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: lowercase; }
@@ -1634,19 +1812,36 @@
   .text-button { font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
   textarea { resize: vertical; padding: 9px; font-size: 10px; line-height: 1.4; margin-bottom: 14px; }
   .panel-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
-
-  @media (max-width: 520px) {
-    .shell {
-      --habit-width: 190px;
-      --day-size: 48px;
-    }
-    .nav-icon { width: 32px; height: 32px; }
-    .timeline-toolbar { height: 14px; min-height: 14px; }
-    .timeline-toolbar-meta { padding-left: 7px; }
-    .habit-name { padding-left: var(--page-inset); padding-right: 2px; }
-    .habit-controls button { width: 27px; height: 42px; font-size: 17px; }
-    .habit-controls .delete-habit { font-size: 20px; }
-    thead th { height: 34px; }
-    .panel { padding: 22px 18px; }
+  .archived-list { display: grid; gap: 0; margin-top: 8px; border-top: 1px solid var(--border); }
+  .archived-item { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 52px; border-bottom: 1px solid var(--border); }
+  .archived-copy { min-width: 0; display: grid; gap: 3px; }
+  .archived-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+  .archived-copy span { color: var(--muted); font-size: 10px; }
+  .archived-actions { flex: none; display: flex; align-items: center; gap: 14px; }
+  .danger-button { color: var(--danger); font-size: 11px; }
+  .danger-button:disabled { opacity: .45; cursor: default; }
+  .danger-confirm { border: 1px solid currentColor; padding: 9px 12px; }
+  .archive-toast {
+    position: fixed;
+    z-index: 120;
+    top: calc(var(--day-size) + env(safe-area-inset-top) + 8px);
+    right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    max-width: calc(100vw - 24px);
+    min-height: 34px;
+    padding: 0 11px;
+    background: var(--text);
+    color: var(--bg);
+    border: 1px solid var(--text);
+    font-size: 11px;
+    white-space: nowrap;
+    box-shadow: 0 3px 10px var(--nav-shadow);
   }
+  .archive-toast span { overflow: hidden; text-overflow: ellipsis; }
+  .archive-toast strong { font-weight: 600; }
+  .archive-toast button { flex: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+
+
 </style>

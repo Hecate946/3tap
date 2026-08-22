@@ -24,14 +24,14 @@ export async function PUT(event: RequestEvent) {
     })
     .filter(Boolean) as { id: string; name: string }[];
 
-
   const { data: existing, error: existingError } = await db
     .from('habits')
-    .select('id')
+    .select('id, archived_at')
     .eq('board_id', id);
   if (existingError) throw error(500, existingError.message);
 
   const existingIds = new Set((existing ?? []).map((habit) => habit.id));
+  const activeIds = new Set((existing ?? []).filter((habit) => !habit.archived_at).map((habit) => habit.id));
   const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const requested = cleaned.map((habit) => ({
     ...habit,
@@ -57,18 +57,25 @@ export async function PUT(event: RequestEvent) {
     id: collisions.has(habit.id) ? randomUUID() : habit.id
   }));
   const incomingIds = new Set(safeCleaned.map((habit) => habit.id));
-  const removedIds = [...existingIds].filter((habitId) => !incomingIds.has(habitId));
 
-  if (removedIds.length) {
-    const { error: deleteError } = await db.from('habits').delete().eq('board_id', id).in('id', removedIds);
-    if (deleteError) throw error(500, deleteError.message);
+  // Missing active habits are archived, never deleted. Already-archived habits
+  // remain archived unless they are explicitly included in the active list again.
+  const archivedNow = [...activeIds].filter((habitId) => !incomingIds.has(habitId));
+  if (archivedNow.length) {
+    const { error: archiveError } = await db
+      .from('habits')
+      .update({ archived_at: new Date().toISOString() })
+      .eq('board_id', id)
+      .in('id', archivedNow);
+    if (archiveError) throw error(500, archiveError.message);
   }
 
   const rows = safeCleaned.map((habit, position) => ({
     id: habit.id,
     board_id: id,
     name: habit.name,
-    position
+    position,
+    archived_at: null
   }));
 
   if (rows.length) {

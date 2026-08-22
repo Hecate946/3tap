@@ -5,6 +5,7 @@ export type Habit = {
   name: string;
   position: number;
   createdAt?: string;
+  archivedAt?: string;
 };
 
 export type Entry = {
@@ -19,6 +20,7 @@ export type Board = {
   createdAt: string;
   updatedAt?: string;
   habits: Habit[];
+  archivedHabits?: Habit[];
   entries: Entry[];
 };
 

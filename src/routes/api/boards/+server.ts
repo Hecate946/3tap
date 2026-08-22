@@ -43,6 +43,7 @@ export async function POST() {
       createdAt: now,
       updatedAt: now,
       habits: habits.map(({ id, name, position }) => ({ id, name, position, createdAt: now })),
+      archivedHabits: [],
       entries: []
     }
   });

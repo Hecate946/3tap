@@ -16,11 +16,19 @@ create table if not exists public.habits (
   board_id uuid not null references public.boards(id) on delete cascade,
   name text not null check (char_length(name) between 1 and 60),
   position integer not null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  archived_at timestamptz
 );
 
 create index if not exists habits_board_position_idx
   on public.habits(board_id, position);
+
+-- Safe upgrade for habits created before archive support.
+alter table public.habits
+  add column if not exists archived_at timestamptz;
+
+create index if not exists habits_board_archived_idx
+  on public.habits(board_id, archived_at);
 
 create table if not exists public.entries (
   board_id uuid not null references public.boards(id) on delete cascade,
