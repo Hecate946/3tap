@@ -31,11 +31,12 @@
     if (!targetCredentials || !targetBoard) return;
 
     const existing = getCredentials();
-    if (!existing || existing.boardId !== targetCredentials.boardId) {
+    const replacingBoard = !existing || existing.boardId !== targetCredentials.boardId;
+    if (replacingBoard) {
       clearLocalBoard();
+      setCachedBoard(targetBoard);
     }
     setCredentials(targetCredentials);
-    setCachedBoard(targetBoard);
     await goto('/', { replaceState: true });
   }
 

@@ -8,31 +8,42 @@
     authHeaders,
     clearLocalBoard,
     compactQueue,
+    createLocalBoardState,
     getCachedBoard,
     getCredentials,
+    getHabitsDirty,
     getQueue,
     setCachedBoard,
     setCredentials,
+    setHabitsDirty,
     setQueue,
     type PendingEntry
   } from '$lib/client';
 
-  type DayColumn = { key: string; weekday: string; day: number; year: number };
+  type DayColumn = { key: string; weekday: string; day: number; month: number; year: number };
   const CLIENT_RESET_VERSION = '2026-08-23-clean-slate-v1';
   if (browser && localStorage.getItem('3tap.client-reset') !== CLIENT_RESET_VERSION) {
     clearLocalBoard();
     localStorage.setItem('3tap.client-reset', CLIENT_RESET_VERSION);
   }
 
-  let board: Board | null = browser ? getCachedBoard() : null;
   let credentials: Credentials | null = browser ? getCredentials() : null;
-  let loading = !board;
+  let board: Board | null = browser ? getCachedBoard() : null;
+  if (browser && !credentials) {
+    if (board) clearLocalBoard();
+    const fresh = createLocalBoardState();
+    credentials = fresh.credentials;
+    board = fresh.board;
+    setCredentials(credentials);
+    setCachedBoard(board);
+  }
   let online = true;
   let theme: 'light' | 'dark' = 'light';
   let navScrolled = false;
   let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
+  let qrModulePromise: Promise<typeof import('qrcode')> | null = null;
   let recoveryInput = '';
   let restoreCodeInput = '';
   let recoveryError = '';
@@ -53,7 +64,7 @@
   let newHabitName = '';
   let editHabitInput: HTMLInputElement;
   let newHabitInput: HTMLInputElement;
-  let pendingHabitSave: Habit[] | null = null;
+  let pendingHabitSave: Habit[] | null = browser && board && getHabitsDirty() ? board.habits : null;
   let scroller: HTMLDivElement;
   let currentDay = new Date();
   let windowEndOffset = 0;
@@ -64,22 +75,29 @@
   let yearDraft = String(currentDay.getFullYear());
   let yearInput: HTMLInputElement;
   const monthOptions = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-  const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
+  const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
   let showTodayButton = false;
   let shiftingWindow = false;
   let scrollRaf = 0;
-  const WINDOW_DAYS = 84;
+  const DAY_SIZE = 48;
+  const HABIT_WIDTH = DAY_SIZE * 4;
+  const WINDOW_DAYS = 14;
   const WINDOW_SHIFT = 7;
-  let minimumVisibleDays = 32;
+  let minimumVisibleDays = browser
+    ? Math.max(1, Math.ceil((window.innerWidth - HABIT_WIDTH) / DAY_SIZE) + 1)
+    : 32;
   const pendingByCell = new Map<string, PendingEntry>();
   const localTapValues = new Map<string, PendingEntry>();
-  let syncTimer: ReturnType<typeof setInterval> | undefined;
+  let syncTimer: ReturnType<typeof setTimeout> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  let persistIdle: number | undefined;
+  let queuePersistTimer: ReturnType<typeof setTimeout> | undefined;
   let habitFlushTimer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<void> | null = null;
   let syncPromise: Promise<void> | null = null;
+  let registrationPromise: Promise<boolean> | null = null;
   let habitFlushPromise: Promise<void> | null = null;
   let draggingHabitId: string | null = null;
   let dragPointerId: number | null = null;
@@ -91,6 +109,7 @@
   let dragPreviewTop = 0;
   let dragPreviewWidth = 0;
   let dragPreviewHeight = 0;
+  let dragRowsTop = 0;
   let dragMoveRaf = 0;
   let dragPendingY: number | null = null;
   let dragLastClientY: number | null = null;
@@ -100,10 +119,12 @@
   let timelinePanActive = false;
 
   const entries = new SvelteMap<string, Entry>();
+  const habitStartKeys = new Map<string, string>();
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
   for (const entry of board?.entries ?? []) {
-    entries.set(cellKey(entry.habitId, entry.date), entry);
+    if (entry.value !== 0) entries.set(cellKey(entry.habitId, entry.date), entry);
   }
+  if (board) board.entries = [];
   if (credentials) {
     for (const change of compactQueue(getQueue())) {
       const key = cellKey(change.habitId, change.date);
@@ -148,25 +169,24 @@
     return Math.floor((toUtc - fromUtc) / 86_400_000);
   }
 
-  function datesForWindow(source: Board | null, endDay: Date, endOffset: number): DayColumn[] {
-    if (!enrollmentDate(source)) return [];
-
+  function datesForWindow(endDay: Date, endOffset: number, visibleDays: number): DayColumn[] {
     const end = shiftedDate(endDay, endOffset);
-    const windowDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
+    const windowDays = Math.max(WINDOW_DAYS, visibleDays + WINDOW_SHIFT);
     const start = shiftedDate(end, -(windowDays - 1));
     const days: DayColumn[] = [];
     for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
       days.push({
         key: dateKey(cursor),
-        weekday: weekdayFormat.format(cursor),
+        weekday: WEEKDAY_LABELS[cursor.getDay()],
         day: cursor.getDate(),
+        month: cursor.getMonth() + 1,
         year: cursor.getFullYear()
       });
     }
     return days;
   }
 
-  $: dates = datesForWindow(board, currentDay, windowEndOffset);
+  $: dates = datesForWindow(currentDay, windowEndOffset, minimumVisibleDays);
   $: todayKey = dateKey(currentDay);
   $: enrolledKey = enrollmentKey(board);
 
@@ -179,9 +199,13 @@
   }
 
   function habitStartKey(habit: Habit) {
+    const cached = habitStartKeys.get(habit.id);
+    if (cached) return cached;
     if (!habit.createdAt) return enrolledKey;
     const created = new Date(habit.createdAt);
-    return dateKey(new Date(created.getFullYear(), created.getMonth(), created.getDate(), 12));
+    const key = dateKey(new Date(created.getFullYear(), created.getMonth(), created.getDate(), 12));
+    habitStartKeys.set(habit.id, key);
+    return key;
   }
 
   function isBeforeHabitStart(habit: Habit, date: string) {
@@ -189,9 +213,24 @@
     return Boolean(start && date < start);
   }
 
+  function reconcileFullEntries(source: Entry[]) {
+    const next = new Map<string, Entry>();
+    for (const entry of source) if (entry.value !== 0) next.set(cellKey(entry.habitId, entry.date), entry);
+    for (const key of entries.keys()) if (!next.has(key)) entries.delete(key);
+    for (const [key, entry] of next) if (entries.get(key)?.value !== entry.value) entries.set(key, entry);
+  }
+
+  function reconcileEntryDelta(source: Entry[], validHabitIds: Set<string>) {
+    for (const [key, entry] of entries) if (!validHabitIds.has(entry.habitId)) entries.delete(key);
+    for (const entry of source) {
+      const key = cellKey(entry.habitId, entry.date);
+      if (entry.value === 0) entries.delete(key);
+      else if (entries.get(key)?.value !== entry.value) entries.set(key, entry);
+    }
+  }
+
   function hydrateEntries(source: Board | null) {
-    entries.clear();
-    for (const entry of source?.entries ?? []) entries.set(cellKey(entry.habitId, entry.date), entry);
+    reconcileFullEntries(source?.entries ?? []);
   }
 
   function valueFor(habitId: string, date: string): MarkValue {
@@ -234,23 +273,43 @@
           });
         }
       }
-      board.entries = [...logicalEntries.values()];
-      setCachedBoard(board);
+      setCachedBoard({ ...board, entries: [...logicalEntries.values()] });
     }
     setQueue(pendingChanges());
   }
 
-  function schedulePersistence() {
+  function cancelScheduledPersistence() {
     if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    if (persistIdle !== undefined && browser) {
+      (window as any).cancelIdleCallback?.(persistIdle);
+      persistIdle = undefined;
+    }
+  }
+
+  function schedulePersistence() {
+    if (persistTimer || persistIdle !== undefined) return;
+    const commit = () => {
       persistTimer = undefined;
+      persistIdle = undefined;
       persistLocalStateNow();
-    }, 300);
+    };
+    const requestIdle = browser ? (window as any).requestIdleCallback : undefined;
+    if (requestIdle) persistIdle = requestIdle(commit, { timeout: 700 });
+    else persistTimer = setTimeout(commit, 300);
+  }
+
+  function scheduleQueuePersistence() {
+    if (queuePersistTimer) clearTimeout(queuePersistTimer);
+    queuePersistTimer = setTimeout(() => {
+      queuePersistTimer = undefined;
+      setQueue(pendingChanges());
+    }, 50);
   }
 
   function queueChange(change: PendingEntry) {
     pendingByCell.set(cellKey(change.habitId, change.date), change);
-    schedulePersistence();
+    scheduleQueuePersistence();
 
     if (flushTimer) clearTimeout(flushTimer);
     flushTimer = setTimeout(() => {
@@ -274,52 +333,96 @@
     queueChange(change);
   }
 
-  async function createBoard() {
-    const response = await fetch('/api/boards', { method: 'POST' });
-    if (!response.ok) throw new Error(await response.text());
-    const data = await response.json();
-    credentials = data.credentials;
-    board = data.board;
-    setCredentials(credentials!);
-    hydrateEntries(board);
-    setCachedBoard(board!);
+  function resetToFreshLocalBoard() {
+    clearLocalBoard();
+    pendingByCell.clear();
+    localTapValues.clear();
+    pendingHabitSave = null;
+    setHabitsDirty(false);
+    entries.clear();
+    habitStartKeys.clear();
+    const fresh = createLocalBoardState();
+    credentials = fresh.credentials;
+    board = fresh.board;
+    setCredentials(credentials);
+    setCachedBoard(board);
   }
 
-  async function fetchBoard(force = false) {
-    if (!credentials) return;
-    const headers: Record<string, string> = authHeaders(credentials);
-    if (!force && board?.updatedAt) headers['if-none-match'] = `"${board.updatedAt}"`;
+  async function ensureBoardRegistered() {
+    if (!credentials) return false;
+    if (!credentials.pendingCreate) return true;
+    if (!navigator.onLine) return false;
+    if (registrationPromise) return registrationPromise;
 
-    const response = await fetch(`/api/boards/${credentials.boardId}`, { headers });
+    registrationPromise = (async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!credentials || !board) return false;
+        const response = await fetch('/api/boards', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ boardId: credentials.boardId, secret: credentials.secret, createdAt: board.createdAt })
+        });
+        if (response.status === 409) {
+          const fresh = createLocalBoardState();
+          credentials = fresh.credentials;
+          setCredentials(credentials);
+          continue;
+        }
+        if (!response.ok) throw new Error(await response.text());
+        const data = (await response.json()) as { credentials: Credentials; board: Board };
+        credentials = { ...data.credentials, pendingCreate: false };
+        board = { ...board, createdAt: data.board.createdAt || board.createdAt, updatedAt: data.board.updatedAt };
+        setCredentials(credentials);
+        schedulePersistence();
+        online = true;
+        return true;
+      }
+      return false;
+    })().catch(() => { online = navigator.onLine; return false; }).finally(() => { registrationPromise = null; });
+    return registrationPromise;
+  }
+
+  function sameHabitSnapshot(a: Habit[], b: Habit[]) {
+    return a.length === b.length && a.every((habit, index) => {
+      const other = b[index];
+      return habit.id === other?.id && habit.name === other.name && habit.position === other.position
+        && habit.createdAt === other.createdAt && habit.archivedAt === other.archivedAt;
+    });
+  }
+
+  async function fetchBoard() {
+    if (!credentials) return;
+    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
+    const headers: Record<string, string> = authHeaders(credentials);
+    if (board?.updatedAt) headers['if-none-match'] = `"${board.updatedAt}"`;
+    const since = board?.updatedAt ? `?since=${encodeURIComponent(board.updatedAt)}` : '';
+    const response = await fetch(`/api/boards/${credentials.boardId}${since}`, { headers });
     if (response.status === 304) return;
     if (!response.ok) {
       if (response.status === 404) {
-        clearLocalBoard();
-        credentials = null;
-        board = null;
-        pendingByCell.clear();
-        localTapValues.clear();
-        pendingHabitSave = null;
-        entries.clear();
-        await createBoard();
+        resetToFreshLocalBoard();
         await tick();
         await scrollToToday();
+        void ensureBoardRegistered();
         return;
       }
       if (response.status === 401) return;
       throw new Error(await response.text());
     }
-
-    const remoteBoard: Board = await response.json();
-    board = pendingHabitSave
-      ? { ...remoteBoard, habits: pendingHabitSave, archivedHabits: board?.archivedHabits ?? remoteBoard.archivedHabits }
-      : remoteBoard;
-    hydrateEntries(board);
-    for (const [key] of localTapValues) {
-      if (!pendingByCell.has(key)) localTapValues.delete(key);
-    }
-    for (const change of pendingChanges()) applyLocalEntry(change);
-    persistLocalStateNow();
+    const remoteBoard = (await response.json()) as Board;
+    const activeHabits = pendingHabitSave ?? remoteBoard.habits;
+    const archivedHabits = pendingHabitSave ? (board?.archivedHabits ?? remoteBoard.archivedHabits ?? []) : (remoteBoard.archivedHabits ?? []);
+    if (remoteBoard.entriesDelta) {
+      const validHabitIds = new Set([...remoteBoard.habits.map(h => h.id), ...archivedHabits.map(h => h.id), ...activeHabits.map(h => h.id)]);
+      reconcileEntryDelta(remoteBoard.entries, validHabitIds);
+    } else reconcileFullEntries(remoteBoard.entries);
+    const changed = !board || !sameHabitSnapshot(board.habits, activeHabits) || !sameHabitSnapshot(board.archivedHabits ?? [], archivedHabits) || board.createdAt !== remoteBoard.createdAt;
+    if (changed || !board) {
+      habitStartKeys.clear();
+      board = { createdAt: remoteBoard.createdAt, updatedAt: remoteBoard.updatedAt, habits: activeHabits, archivedHabits, entries: [] };
+    } else board.updatedAt = remoteBoard.updatedAt;
+    for (const [key] of localTapValues) if (!pendingByCell.has(key)) localTapValues.delete(key);
+    schedulePersistence();
   }
 
   async function flushQueue(options: { keepalive?: boolean } = {}) {
@@ -329,6 +432,7 @@
       if (pendingHabitSave) return;
     }
     if (!credentials || !navigator.onLine || pendingByCell.size === 0) return;
+    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
 
     flushPromise = (async () => {
       const sent = new Map(pendingByCell);
@@ -372,6 +476,7 @@
 
     syncPromise = (async () => {
       try {
+        if (!(await ensureBoardRegistered())) return;
         await flushHabitChanges();
         await flushQueue();
         await fetchBoard();
@@ -386,16 +491,7 @@
     return syncPromise;
   }
 
-  function timelineMetrics() {
-    if (!scroller) return null;
-    const dayHead = scroller.querySelector<HTMLElement>('.timeline-header .day-head');
-    const habitHead = scroller.querySelector<HTMLElement>('.timeline-header .timeline-side');
-    if (!dayHead || !habitHead) return null;
-    return {
-      dayWidth: dayHead.getBoundingClientRect().width,
-      habitWidth: habitHead.getBoundingClientRect().width
-    };
-  }
+  function timelineMetrics() { return { dayWidth: DAY_SIZE, habitWidth: HABIT_WIDTH }; }
 
   function updateMinimumVisibleDays() {
     if (!scroller) return false;
@@ -420,7 +516,7 @@
     if (!metrics) return;
     const index = Math.max(0, Math.min(dates.length - 1, Math.floor(scroller.scrollLeft / metrics.dayWidth)));
     const date = dates[index];
-    setVisibleMonthState(date.year, Number(date.key.slice(5, 7)));
+    setVisibleMonthState(date.year, date.month);
 
     const rightGap = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft;
     showTodayButton = windowEndOffset < 0 || rightGap > 2;
@@ -474,7 +570,7 @@
   function startTimelinePan(event: PointerEvent) {
     if (!scroller || event.button !== 0 || event.pointerType !== 'mouse' || dragActive) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest('.habit-name, .timeline-side, .add-row, input, textarea, button:not(:disabled)')) return;
+    if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
 
     event.preventDefault();
     timelinePanPointerId = event.pointerId;
@@ -630,56 +726,29 @@
     }
   }
 
+  function loadQrModule() { qrModulePromise ??= import('qrcode'); return qrModulePromise; }
+
   async function ensureRecoveryCode() {
     if (!credentials || credentials.recoveryCode || !navigator.onLine) return;
-
-    const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}/recovery`, {
-      method: 'POST',
-      headers: authHeaders(credentials)
-    });
+    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
+    const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}/recovery`, { method: 'POST', headers: authHeaders(credentials) });
     if (!response.ok) throw new Error(await response.text());
-
     const data = (await response.json()) as { recoveryCode: string };
     credentials = { ...credentials, recoveryCode: data.recoveryCode };
     setCredentials(credentials);
   }
 
-  async function openAccess() {
+  function openAccess() {
     if (!credentials) return;
-    pairingCopied = false;
-    recoveryInput = credentials.recoveryCode ?? '';
-    restoreCodeInput = '';
-    recoveryError = '';
-    recoveryCopied = false;
-    recovering = false;
-    deleteBoardError = '';
-    panel = 'access';
-    if (navigator.onLine) {
-      await flushHabitChanges();
-      await flushQueue();
-      try {
-        await ensureRecoveryCode();
-        recoveryInput = credentials?.recoveryCode ?? '';
-      } catch {
-        recoveryInput = '';
-      }
-    }
-
-    if (!credentials) return;
-    const recoveryPart = credentials.recoveryCode ? `.${credentials.recoveryCode}` : '';
-    const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}${recoveryPart}`;
-    if (pairingLink !== nextLink) {
-      pairingLink = nextLink;
-      qrDataUrl = '';
-    }
-    if (!qrDataUrl) {
-      const { toDataURL } = await import('qrcode');
-      qrDataUrl = await toDataURL(pairingLink, {
-        width: 280,
-        margin: 1,
-        color: { dark: '#11110f', light: '#f7f7f5' }
-      });
-    }
+    pairingCopied = false; recoveryInput = credentials.recoveryCode ?? ''; restoreCodeInput = ''; recoveryError = '';
+    recoveryCopied = false; recovering = false; deleteBoardError = ''; panel = 'access';
+    const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
+    if (pairingLink !== nextLink) { pairingLink = nextLink; qrDataUrl = ''; }
+    if (!qrDataUrl) void loadQrModule().then(({ toDataURL }) => toDataURL(pairingLink, { width: 280, margin: 1, color: { dark: '#11110f', light: '#f7f7f5' } })).then(url => { if (panel === 'access') qrDataUrl = url; }).catch(() => {});
+    if (navigator.onLine) void (async () => {
+      await flushHabitChanges(); await flushQueue();
+      try { await ensureRecoveryCode(); recoveryInput = credentials?.recoveryCode ?? ''; } catch { recoveryInput = ''; }
+    })();
   }
 
   async function copyPairingLink() {
@@ -697,6 +766,7 @@
     const next = normalizeHabits(habits);
     board = { ...board, habits: next };
     pendingHabitSave = next;
+    setHabitsDirty(true);
     schedulePersistence();
 
     if (habitFlushTimer) clearTimeout(habitFlushTimer);
@@ -709,6 +779,7 @@
   async function flushHabitChanges() {
     if (habitFlushPromise) return habitFlushPromise;
     if (!credentials || !navigator.onLine || !pendingHabitSave) return;
+    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
 
     const sent = pendingHabitSave;
     habitFlushPromise = (async () => {
@@ -719,18 +790,9 @@
           body: JSON.stringify({ habits: sent.map(({ id, name }) => ({ id, name })) })
         });
         if (!response.ok) throw new Error(await response.text());
-        const saved: Board = await response.json();
-
         if (pendingHabitSave === sent) {
           pendingHabitSave = null;
-          if (board) {
-            board = {
-              ...board,
-              habits: saved.habits,
-              archivedHabits: saved.archivedHabits ?? [],
-              updatedAt: saved.updatedAt
-            };
-          }
+          setHabitsDirty(false);
           schedulePersistence();
         }
         online = true;
@@ -762,7 +824,7 @@
   function commitRename() {
     if (!board || !editingHabitId) return;
     const id = editingHabitId;
-    const name = editingHabitName.trim();
+    const name = editingHabitName.trim().slice(0, 60);
     editingHabitId = null;
     editingHabitName = '';
     if (!name) return;
@@ -784,6 +846,8 @@
     if (!habit || !cell) return;
 
     const rect = cell.getBoundingClientRect();
+    const currentIndex = board.habits.findIndex((item) => item.id === habit.id);
+    dragRowsTop = rect.top - Math.max(0, currentIndex) * rect.height;
     dragActive = true;
     draggingHabitId = habit.id;
     dragOriginalHabits = [...board.habits];
@@ -799,41 +863,20 @@
 
   function updateLiveHabitOrder(clientY: number) {
     if (!board || !draggingHabitId || !dragCandidate) return;
-
     const currentIndex = board.habits.findIndex((habit) => habit.id === draggingHabitId);
     if (currentIndex < 0) return;
-
     const previousY = dragLastClientY ?? clientY;
     const movingUp = clientY < previousY;
     const movingDown = clientY > previousY;
     dragLastClientY = clientY;
     if (!movingUp && !movingDown) return;
-
     const previewTop = clientY - dragCandidate.offsetY;
     const previewBottom = previewTop + dragPreviewHeight;
+    const rowHeight = dragPreviewHeight || DAY_SIZE;
     let targetIndex = currentIndex;
-    if (movingUp) {
-      for (let index = currentIndex - 1; index >= 0; index -= 1) {
-        const habit = board.habits[index];
-        const row = document.querySelector<HTMLTableRowElement>(`tr[data-habit-id="${habit.id}"]`);
-        if (!row) continue;
-        const rect = row.getBoundingClientRect();
-        if (previewTop < rect.bottom) targetIndex = index;
-        else break;
-      }
-    } else if (movingDown) {
-      for (let index = currentIndex + 1; index < board.habits.length; index += 1) {
-        const habit = board.habits[index];
-        const row = document.querySelector<HTMLTableRowElement>(`tr[data-habit-id="${habit.id}"]`);
-        if (!row) continue;
-        const rect = row.getBoundingClientRect();
-        if (previewBottom > rect.top) targetIndex = index;
-        else break;
-      }
-    }
-
+    if (movingUp) targetIndex = Math.max(0, Math.min(currentIndex, Math.floor((previewTop - dragRowsTop) / rowHeight)));
+    else targetIndex = Math.max(currentIndex, Math.min(board.habits.length - 1, Math.ceil((previewBottom - dragRowsTop) / rowHeight) - 1));
     if (targetIndex === currentIndex) return;
-
     const next = [...board.habits];
     const [dragged] = next.splice(currentIndex, 1);
     next.splice(targetIndex, 0, dragged);
@@ -873,6 +916,7 @@
     dragActive = false;
     dragOriginalHabits = null;
     dragPreviewName = '';
+    dragRowsTop = 0;
   }
 
   function onHabitDragMove(event: PointerEvent) {
@@ -1022,6 +1066,9 @@
     archiveError = '';
 
     try {
+      if (credentials.pendingCreate && !(await ensureBoardRegistered())) throw new Error('Connect to the internet to delete this habit.');
+      await flushHabitChanges();
+      if (pendingHabitSave) throw new Error('Could not sync changes yet. Try again.');
       const response = await fetch(`/api/boards/${credentials.boardId}/habits/${target.id}`, {
         method: 'DELETE',
         headers: authHeaders(credentials)
@@ -1030,17 +1077,12 @@
         throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
       }
 
-      board = {
-        ...board,
-        archivedHabits: (board.archivedHabits ?? []).filter((habit) => habit.id !== target.id),
-        entries: (board.entries ?? []).filter((entry) => entry.habitId !== target.id)
-      };
-      hydrateEntries(board);
-      pendingHabitSave = null;
+      for (const [key, entry] of entries) if (entry.habitId === target.id) entries.delete(key);
+      board = { ...board, archivedHabits: (board.archivedHabits ?? []).filter((habit) => habit.id !== target.id), entries: [] };
       deleteHabitTarget = null;
-      persistLocalStateNow();
+      schedulePersistence();
       panel = 'archived';
-      void fetchBoard(true).catch(() => {});
+      void fetchBoard().catch(() => {});
     } catch (error) {
       archiveError = error instanceof Error ? error.message : 'could not delete · retry';
     } finally {
@@ -1051,40 +1093,20 @@
   async function clearArchive() {
     if (!credentials || !board || clearingArchive) return;
     const archived = [...(board.archivedHabits ?? [])];
-    if (!archived.length) {
-      panel = 'archived';
-      return;
-    }
-
-    clearingArchive = true;
-    archiveError = '';
+    if (!archived.length) { panel = 'archived'; return; }
+    clearingArchive = true; archiveError = '';
     try {
-      for (const habit of archived) {
-        const response = await fetch(`/api/boards/${credentials.boardId}/habits/${habit.id}`, {
-          method: 'DELETE',
-          headers: authHeaders(credentials)
-        });
-        if (!response.ok && response.status !== 404) {
-          throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
-        }
-      }
-
-      const archivedIds = new Set(archived.map((habit) => habit.id));
-      board = {
-        ...board,
-        archivedHabits: [],
-        entries: (board.entries ?? []).filter((entry) => !archivedIds.has(entry.habitId))
-      };
-      hydrateEntries(board);
-      pendingHabitSave = null;
-      persistLocalStateNow();
-      panel = 'archived';
-      void fetchBoard(true).catch(() => {});
-    } catch (error) {
-      archiveError = error instanceof Error ? error.message : 'could not clear archive · retry';
-    } finally {
-      clearingArchive = false;
-    }
+      if (credentials.pendingCreate && !(await ensureBoardRegistered())) throw new Error('Connect to the internet to clear the archive.');
+      await flushHabitChanges();
+      if (pendingHabitSave) throw new Error('Could not sync changes yet. Try again.');
+      const response = await fetch(`/api/boards/${credentials.boardId}/habits`, { method: 'DELETE', headers: authHeaders(credentials) });
+      if (!response.ok) throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
+      const archivedIds = new Set(archived.map(h => h.id));
+      for (const [key, entry] of entries) if (archivedIds.has(entry.habitId)) entries.delete(key);
+      board = { ...board, archivedHabits: [], entries: [] };
+      schedulePersistence(); panel = 'archived'; void fetchBoard().catch(() => {});
+    } catch (error) { archiveError = error instanceof Error ? error.message : 'could not clear archive · retry'; }
+    finally { clearingArchive = false; }
   }
 
   async function beginAddHabit() {
@@ -1096,7 +1118,7 @@
 
   function commitAddHabit() {
     if (!board || !addingHabit) return;
-    const name = newHabitName.trim();
+    const name = newHabitName.trim().slice(0, 60);
     addingHabit = false;
     newHabitName = '';
     if (!name) return;
@@ -1155,6 +1177,7 @@
       pendingByCell.clear();
       localTapValues.clear();
       pendingHabitSave = null;
+      setHabitsDirty(false);
       entries.clear();
       hydrateEntries(recovered.board);
       qrDataUrl = '';
@@ -1187,35 +1210,15 @@
 
   async function deleteBoardForever() {
     if (!credentials || deletingBoard) return;
-    deletingBoard = true;
-    deleteBoardError = '';
-
+    deletingBoard = true; deleteBoardError = '';
     try {
-      const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}`, {
-        method: 'DELETE',
-        headers: authHeaders(credentials)
-      });
-      if (!response.ok) {
-        const raw = await response.text();
-        let message = raw;
-        try {
-          const parsed = JSON.parse(raw);
-          if (typeof parsed?.message === 'string') message = parsed.message;
-        } catch {}
-        throw new Error(message || 'Could not delete this board.');
+      if (!credentials.pendingCreate) {
+        const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}`, { method: 'DELETE', headers: authHeaders(credentials) });
+        if (!response.ok && response.status !== 404) throw new Error(await apiErrorMessage(response, 'Could not delete this board.'));
       }
-      clearLocalBoard();
-      pendingByCell.clear();
-      localTapValues.clear();
-      pendingHabitSave = null;
-      entries.clear();
-      location.reload();
-    } catch (error) {
-      deleteBoardError = error instanceof Error && error.message
-        ? error.message
-        : 'Could not delete this board. Try again.';
-      deletingBoard = false;
-    }
+      resetToFreshLocalBoard(); panel = 'none'; deletingBoard = false;
+      await tick(); await scrollToToday(); void ensureBoardRegistered();
+    } catch (error) { deleteBoardError = error instanceof Error && error.message ? error.message : 'Could not delete this board. Try again.'; deletingBoard = false; }
   }
 
   function scheduleNextDay() {
@@ -1244,50 +1247,32 @@
     applyTheme(theme === 'dark' ? 'light' : 'dark');
   }
 
+  function scheduleSyncLoop() {
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = undefined;
+    if (document.visibilityState !== 'visible') return;
+    syncTimer = setTimeout(async () => { await sync(); scheduleSyncLoop(); }, 8000);
+  }
+
   async function initialize() {
     online = navigator.onLine;
-    if (!credentials) credentials = getCredentials();
-    if (!board) board = getCachedBoard();
-
-    pendingByCell.clear();
-    localTapValues.clear();
-    for (const change of compactQueue(getQueue())) {
-      const key = cellKey(change.habitId, change.date);
-      pendingByCell.set(key, change);
-      localTapValues.set(key, change);
-    }
-    if (!credentials) {
-      pendingByCell.clear();
-      localTapValues.clear();
-    }
-    hydrateEntries(board);
-    for (const change of pendingChanges()) applyLocalEntry(change);
-    if (board && credentials) {
-      loading = false;
-      await scrollToToday();
-      void sync();
-      return;
-    }
-
-    try {
-      if (!credentials) await createBoard();
-      else await sync();
-    } catch {
-      online = navigator.onLine;
-    } finally {
-      loading = false;
-      await scrollToToday();
-    }
+    if (!credentials) resetToFreshLocalBoard();
+    if (!board && credentials && navigator.onLine) { try { await fetchBoard(); } catch { online = navigator.onLine; } }
+    if (board) await scrollToToday();
+    void sync();
   }
 
   onMount(() => {
     theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
     void initialize();
+    const prewarmQr = () => void loadQrModule();
+    if ((window as any).requestIdleCallback) (window as any).requestIdleCallback(prewarmQr, { timeout: 2500 });
+    else setTimeout(prewarmQr, 1200);
 
     const onFocus = () => void sync();
     const onOnline = () => credentials ? void sync() : void initialize();
     const onOffline = () => (online = false);
-    const onVisibility = () => document.visibilityState === 'visible' && void sync();
+    const onVisibility = () => { if (document.visibilityState === 'visible') void sync(); scheduleSyncLoop(); };
     const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
     const onDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
@@ -1298,6 +1283,7 @@
       updateTimelineStatus();
     };
     const onPageHide = () => {
+      cancelScheduledPersistence();
       persistLocalStateNow();
       void flushHabitChanges();
       void flushQueue({ keepalive: true });
@@ -1313,7 +1299,7 @@
     document.addEventListener('pointerdown', onDocumentPointerDown);
     onVerticalScroll();
 
-    syncTimer = setInterval(() => void sync(), 8000);
+    scheduleSyncLoop();
     scheduleNextDay();
 
     return () => {
@@ -1325,10 +1311,11 @@
       window.removeEventListener('resize', onResize);
       window.removeEventListener('scroll', onVerticalScroll);
       document.removeEventListener('pointerdown', onDocumentPointerDown);
-      if (syncTimer) clearInterval(syncTimer);
+      if (syncTimer) clearTimeout(syncTimer);
       if (dayTimer) clearTimeout(dayTimer);
       if (flushTimer) clearTimeout(flushTimer);
-      if (persistTimer) clearTimeout(persistTimer);
+      cancelScheduledPersistence();
+      if (queuePersistTimer) clearTimeout(queuePersistTimer);
       if (habitFlushTimer) clearTimeout(habitFlushTimer);
       if (archiveToastTimer) clearTimeout(archiveToastTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
@@ -1612,7 +1599,7 @@
       {/if}
     </main>
   {:else}
-    <main aria-busy={loading}></main>
+    <main></main>
   {/if}
 
 </div>
@@ -1672,7 +1659,7 @@
             spellcheck="false"
             autocomplete="off"
             autocapitalize="none"
-            placeholder="winter_donkey_maple_cloud_…"
+            placeholder="winter_donkey_maple_cloud..."
             oninput={() => (recoveryError = '')}
           ></textarea>
           {#if recoveryError}<p class="recovery-error" role="alert">{recoveryError}</p>{/if}
@@ -1793,16 +1780,16 @@
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
-    --icon-device: #4d7fa8;
-    --icon-archive: #b75f63;
-    --icon-theme: #b18a22;
+    --icon-device: #225866;
+    --icon-archive: #af4b53;
+    --icon-theme: #ca9503;
     --danger: #9b332b;
     background: var(--bg);
     color-scheme: light;
   }
   :global(html[data-theme='dark']) {
-    --bg: #0e1112;
-    --surface: #15191a;
+    --bg: #041318;
+    --surface: #071a20;
     --text: #ecece6;
     --muted: #afb0a9;
     --control-text: #c8c9c2;
@@ -1821,9 +1808,9 @@
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
-    --icon-device: #79a5c8;
-    --icon-archive: #cf777b;
-    --icon-theme: #d7ba58;
+    --icon-device: #225866;
+    --icon-archive: #af4b53;
+    --icon-theme: #ca9503;
     --danger: #e58d82;
     color-scheme: dark;
   }
@@ -1848,7 +1835,6 @@
     --habit-width: calc(var(--day-size) * 4);
     --line: 1px;
     --grid: var(--grid-weak-theme);
-    --grid-weak: var(--grid);
     --page-inset: 16px;
     min-height: 100dvh;
     padding: 0;
@@ -2312,7 +2298,11 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   .zero-add-row {
     width: 100%;
     height: var(--day-size);
+    touch-action: pan-y;
+    cursor: default;
   }
+  .zero-add-row * { touch-action: pan-y; }
+  .zero-add-row button { cursor: pointer; }
   .zero-add-cell {
     position: sticky;
     left: 0;
@@ -2367,7 +2357,9 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   .add-row,
   .add-row * {
     touch-action: pan-y;
+    cursor: default;
   }
+  .add-row button { cursor: pointer; }
   .state-legend {
     position: sticky;
     right: 0;

@@ -13,11 +13,7 @@ worker.addEventListener('install', (event) => {
 });
 
 worker.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
-  );
+  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))));
   worker.clients.claim();
 });
 
@@ -27,31 +23,29 @@ worker.addEventListener('fetch', (event) => {
   if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
 
   if (IMMUTABLE.has(url.pathname)) {
-    event.respondWith(
-      caches.match(event.request).then((cached) => cached ?? fetch(event.request))
-    );
+    event.respondWith(caches.match(event.request).then((cached) => cached ?? fetch(event.request)));
     return;
   }
 
   if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request).catch(async () => {
-        const cached = await caches.match(event.request);
-        return cached ?? (await caches.match('/')) ?? new Response('offline', { status: 503 });
-      })
-    );
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      const cached = await cache.match('/') ?? await cache.match(event.request);
+      const refresh = fetch(event.request).then((response) => {
+        if (response.ok) void cache.put('/', response.clone());
+        return response;
+      });
+      if (cached) {
+        event.waitUntil(refresh.catch(() => undefined));
+        return cached;
+      }
+      return refresh.catch(() => new Response('offline', { status: 503 }));
+    })());
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cached) =>
-      cached ?? fetch(event.request).then((response) => {
-        if (response.ok) {
-          const copy = response.clone();
-          void caches.open(CACHE).then((cache) => cache.put(event.request, copy));
-        }
-        return response;
-      })
-    )
-  );
+  event.respondWith(caches.match(event.request).then((cached) => cached ?? fetch(event.request).then((response) => {
+    if (response.ok) void caches.open(CACHE).then((cache) => cache.put(event.request, response.clone()));
+    return response;
+  })));
 });

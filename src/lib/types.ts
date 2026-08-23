@@ -11,7 +11,7 @@ export type Habit = {
 export type Entry = {
   habitId: string;
   date: string;
-  value: 1 | 2;
+  value: MarkValue;
 };
 
 export type Board = {
@@ -20,10 +20,12 @@ export type Board = {
   habits: Habit[];
   archivedHabits?: Habit[];
   entries: Entry[];
+  entriesDelta?: boolean;
 };
 
 export type Credentials = {
   boardId: string;
   secret: string;
   recoveryCode?: string;
+  pendingCreate?: boolean;
 };
