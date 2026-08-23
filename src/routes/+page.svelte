@@ -80,7 +80,7 @@
   let shiftingWindow = false;
   let scrollRaf = 0;
   const DAY_SIZE = 48;
-  const HABIT_WIDTH = DAY_SIZE * 4;
+  const HABIT_WIDTH = DAY_SIZE * 3;
   const WINDOW_DAYS = 14;
   const WINDOW_SHIFT = 7;
   let minimumVisibleDays = browser
@@ -116,10 +116,13 @@
   let dragLastClientY: number | null = null;
   let timelinePanPointerId: number | null = null;
   let timelinePanStartX = 0;
-  let timelinePanStartY = 0;
   let timelinePanStartScrollLeft = 0;
-  let timelinePanPointerType = '';
   let timelinePanActive = false;
+  let timelineTouchId: number | null = null;
+  let timelineTouchStartX = 0;
+  let timelineTouchStartY = 0;
+  let timelineTouchStartScrollLeft = 0;
+  let timelineTouchAxis: '' | 'x' | 'y' = '';
 
   const entries = new SvelteMap<string, Entry>();
   const habitStartKeys = new Map<string, string>();
@@ -532,6 +535,7 @@
     const compensation = count * metrics.dayWidth;
     scroller.scrollLeft = beforeScrollLeft + compensation;
     if (timelinePanPointerId !== null) timelinePanStartScrollLeft += compensation;
+    if (timelineTouchId !== null) timelineTouchStartScrollLeft += compensation;
   }
 
   async function appendTimelineDays(count: number) {
@@ -581,15 +585,14 @@
 
   function startTimelinePan(event: PointerEvent) {
     if (!scroller || event.button !== 0 || !event.isPrimary || dragActive) return;
+    if (event.pointerType !== 'mouse') return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
 
-    if (event.pointerType === 'mouse') event.preventDefault();
+    event.preventDefault();
     timelinePanPointerId = event.pointerId;
     timelinePanStartX = event.clientX;
-    timelinePanStartY = event.clientY;
     timelinePanStartScrollLeft = scroller.scrollLeft;
-    timelinePanPointerType = event.pointerType;
     timelinePanActive = false;
     scroller.setPointerCapture?.(event.pointerId);
   }
@@ -597,13 +600,11 @@
   function moveTimelinePan(event: PointerEvent) {
     if (!scroller || event.pointerId !== timelinePanPointerId) return;
     const dx = event.clientX - timelinePanStartX;
-    const dy = event.clientY - timelinePanStartY;
-    const threshold = timelinePanPointerType === 'mouse' ? 2 : 6;
+    const threshold = 2;
     if (!timelinePanActive && Math.abs(dx) < threshold) return;
-    if (!timelinePanActive && timelinePanPointerType !== 'mouse' && Math.abs(dx) <= Math.abs(dy)) return;
     if (!timelinePanActive) {
       timelinePanActive = true;
-      if (timelinePanPointerType === 'mouse') document.documentElement.classList.add('timeline-panning-cursor');
+      document.documentElement.classList.add('timeline-panning-cursor');
     }
     event.preventDefault();
     scroller.scrollLeft = timelinePanStartScrollLeft - dx;
@@ -613,16 +614,48 @@
     if (!scroller || event.pointerId !== timelinePanPointerId) return;
     if (scroller.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
     timelinePanPointerId = null;
-    timelinePanPointerType = '';
     timelinePanActive = false;
     document.documentElement.classList.remove('timeline-panning-cursor');
   }
 
   function cleanupTimelinePan() {
     timelinePanPointerId = null;
-    timelinePanPointerType = '';
     timelinePanActive = false;
     document.documentElement.classList.remove('timeline-panning-cursor');
+  }
+
+  function startTimelineTouch(event: TouchEvent) {
+    if (!scroller || event.touches.length !== 1 || dragActive) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
+    const touch = event.touches[0];
+    timelineTouchId = touch.identifier;
+    timelineTouchStartX = touch.clientX;
+    timelineTouchStartY = touch.clientY;
+    timelineTouchStartScrollLeft = scroller.scrollLeft;
+    timelineTouchAxis = '';
+  }
+
+  function moveTimelineTouch(event: TouchEvent) {
+    if (!scroller || timelineTouchId === null) return;
+    const touch = Array.from(event.touches).find((item) => item.identifier === timelineTouchId);
+    if (!touch) return;
+    const dx = touch.clientX - timelineTouchStartX;
+    const dy = touch.clientY - timelineTouchStartY;
+
+    if (!timelineTouchAxis) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 4) return;
+      timelineTouchAxis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    }
+    if (timelineTouchAxis !== 'x') return;
+
+    event.preventDefault();
+    scroller.scrollLeft = timelineTouchStartScrollLeft - dx;
+  }
+
+  function endTimelineTouch() {
+    timelineTouchId = null;
+    timelineTouchAxis = '';
   }
 
   function visibleYear() {
@@ -1325,6 +1358,11 @@
       void flushQueue({ keepalive: true });
     };
 
+    scroller?.addEventListener('touchstart', startTimelineTouch, { passive: true });
+    scroller?.addEventListener('touchmove', moveTimelineTouch, { passive: false });
+    scroller?.addEventListener('touchend', endTimelineTouch, { passive: true });
+    scroller?.addEventListener('touchcancel', endTimelineTouch, { passive: true });
+
     window.addEventListener('focus', onFocus);
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
@@ -1339,6 +1377,10 @@
     scheduleNextDay();
 
     return () => {
+      scroller?.removeEventListener('touchstart', startTimelineTouch);
+      scroller?.removeEventListener('touchmove', moveTimelineTouch);
+      scroller?.removeEventListener('touchend', endTimelineTouch);
+      scroller?.removeEventListener('touchcancel', endTimelineTouch);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
@@ -1867,7 +1909,7 @@
 
   .shell {
     --day-size: 48px;
-    --habit-width: calc(var(--day-size) * 4);
+    --habit-width: calc(var(--day-size) * 3);
     --line: 1px;
     --grid: var(--grid-weak-theme);
     --page-inset: 16px;
