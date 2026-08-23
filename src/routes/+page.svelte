@@ -782,15 +782,6 @@
     setLocalHabits(board.habits.map((habit) => (habit.id === id ? { ...habit, name } : habit)));
   }
 
-  function moveHabit(index: number, direction: -1 | 1) {
-    if (!board) return;
-    const next = index + direction;
-    if (next < 0 || next >= board.habits.length) return;
-    const copy = [...board.habits];
-    [copy[index], copy[next]] = [copy[next], copy[index]];
-    setLocalHabits(copy);
-  }
-
   function blockDragClick(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -1539,12 +1530,6 @@
                       <button class="habit-label" onclick={() => beginRename(habit)}>{habit.name}</button>
                     {/if}
                     <div class="habit-controls">
-                      <button disabled={habitIndex === 0} aria-label={`Move ${habit.name} up`} onclick={() => moveHabit(habitIndex, -1)}>
-                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12V4M4.75 7.25 8 4l3.25 3.25" /></svg>
-                      </button>
-                      <button disabled={habitIndex === board.habits.length - 1} aria-label={`Move ${habit.name} down`} onclick={() => moveHabit(habitIndex, 1)}>
-                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 4v8m-3.25-3.25L8 12l3.25-3.25" /></svg>
-                      </button>
                       <button
                         class="delete-habit"
                         aria-label={`Archive ${habit.name}`}
@@ -1864,7 +1849,7 @@
 
   .shell {
     --day-size: 48px;
-    --habit-width: calc(var(--day-size) * 6);
+    --habit-width: calc(var(--day-size) * 4);
     --line: 1px;
     --grid: var(--grid-weak-theme);
     --grid-weak: var(--grid);
@@ -2125,7 +2110,7 @@
     width: 36px;
     height: 36px;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: 0;
     background: transparent;
     pointer-events: none;
     transition: border-color 110ms ease, background-color 110ms ease;
@@ -2285,15 +2270,14 @@
   .habit-controls {
     flex: none;
     display: grid;
-    grid-template-columns: repeat(3, 32px);
+    grid-template-columns: 36px;
     align-items: center;
     justify-items: center;
-    gap: 0;
     margin-left: auto;
   }
   .habit-controls button {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     display: grid;
     place-items: center;
     color: var(--control-text);
@@ -2311,12 +2295,11 @@
     stroke-linejoin: round;
   }
   .habit-controls .row-archive-icon {
-    width: 17px;
-    height: 17px;
-    stroke-width: 1.45;
+    width: 18px;
+    height: 18px;
+    stroke-width: 1.5;
   }
   .habit-controls .delete-habit { color: var(--control-text); }
-  .habit-controls button:disabled { opacity: .22; cursor: default; }
   .habit-name {
     cursor: grab;
     touch-action: none;
@@ -2366,14 +2349,20 @@
     background: transparent;
   }
   .state-legend {
+    position: sticky;
+    right: 0;
+    width: max-content;
     height: var(--day-size);
+    margin-left: auto;
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 14px;
-    padding-right: var(--page-inset);
+    padding: 0 var(--page-inset) 0 12px;
+    background: var(--bg);
     color: var(--muted);
-    font-size: 9px;
+    font-size: 11px;
+    line-height: 1;
     white-space: nowrap;
     opacity: .62;
     pointer-events: none;
@@ -2382,10 +2371,11 @@
     display: inline-flex;
     align-items: baseline;
     gap: 4px;
+    font-size: inherit;
   }
   .state-legend b {
     color: var(--timeline-mark);
-    font-size: 11px;
+    font-size: inherit;
     font-weight: 500;
   }
   .add-habit {

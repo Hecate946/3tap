@@ -1,10 +1,11 @@
-3tap toolbar + row icon polish
+3tap compact habit rail update
 
-- Replaces the per-habit X with a dedicated archive/down-to-box icon.
-- Makes the recovery key slightly larger for optical balance.
-- Replaces color-shift toolbar hover with a subtle rounded border/background hover box.
-- Nudges Archive toward a warmer muted orange in both themes.
+- removes up/down row buttons; drag-to-reorder remains
+- shrinks the fixed habit rail from 6 grid columns (288px) to 4 (192px)
+- keeps the four top toolbar icons at one 48px column each
+- gives the remaining per-habit archive action a slightly larger 36px target / 18px glyph
 
 Apply from the 3tap project root:
-  unzip -o ~/Downloads/3tap-toolbar-row-icon-polish-patch.zip
-  npm run dev
+
+unzip -o ~/Downloads/3tap-4col-no-arrows-patch.zip
+npm run dev
