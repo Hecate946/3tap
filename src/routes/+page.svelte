@@ -43,7 +43,9 @@
   let currentDay = new Date();
   let windowEndOffset = 0;
   let visibleMonthLabel = `${new Intl.DateTimeFormat(undefined, { month: 'short' }).format(currentDay).toUpperCase()} ${currentDay.getFullYear()}`;
-  let visibleMonthValue = `${currentDay.getFullYear()}-${String(currentDay.getMonth() + 1).padStart(2, '0')}`;
+  let displayMonthIndex = currentDay.getMonth();
+  let displayYear = currentDay.getFullYear();
+  let monthMenuOpen = false;
   let yearEditing = false;
   let yearDraft = String(currentDay.getFullYear());
   let yearInput: HTMLInputElement;
@@ -414,6 +416,13 @@
     return false;
   }
 
+  function setVisibleMonthState(year: number, month: number) {
+    const safeMonth = Math.max(1, Math.min(12, month));
+    displayYear = year;
+    displayMonthIndex = safeMonth - 1;
+    visibleMonthLabel = `${monthOptions[safeMonth - 1]} ${year}`;
+  }
+
   function updateTimelineStatus() {
     if (!scroller || !dates.length) return;
     const metrics = timelineMetrics();
@@ -423,8 +432,7 @@
     // its placement directly beside the habit/timeline divider feel literal.
     const index = Math.max(0, Math.min(dates.length - 1, Math.floor(scroller.scrollLeft / metrics.dayWidth)));
     const date = dates[index];
-    visibleMonthLabel = `${date.month} ${date.year}`;
-    visibleMonthValue = date.key.slice(0, 7);
+    setVisibleMonthState(date.year, Number(date.key.slice(5, 7)));
 
     const rightGap = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft;
     showTodayButton = windowEndOffset < 0 || rightGap > 2;
@@ -520,20 +528,39 @@
   }
 
   function visibleYear() {
-    return Number(visibleMonthValue.slice(0, 4)) || currentDay.getFullYear();
+    return displayYear;
   }
 
   function visibleMonth() {
-    return Number(visibleMonthValue.slice(5, 7)) || currentDay.getMonth() + 1;
+    return displayMonthIndex + 1;
   }
 
-  function chooseMonth(event: Event) {
-    const month = Number((event.currentTarget as HTMLSelectElement).value);
+  function toggleMonthMenu() {
+    monthMenuOpen = !monthMenuOpen;
+  }
+
+  function chooseMonth(month: number) {
     if (!Number.isInteger(month) || month < 1 || month > 12) return;
-    void jumpToMonth(`${String(visibleYear()).padStart(4, '0')}-${String(month).padStart(2, '0')}`);
+    monthMenuOpen = false;
+
+    const year = visibleYear();
+    const currentYear = currentDay.getFullYear();
+    const currentMonth = currentDay.getMonth() + 1;
+    if (year > currentYear || (year === currentYear && month > currentMonth)) {
+      void scrollToToday();
+      return;
+    }
+
+    // Update the control immediately. The timeline jump below will reconcile
+    // the visible month from the actual scroller position once it finishes.
+    const value = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
+    setVisibleMonthState(year, month);
+    yearDraft = String(year);
+    void jumpToMonth(value);
   }
 
   async function beginYearEdit() {
+    monthMenuOpen = false;
     yearDraft = String(visibleYear());
     yearEditing = true;
     await tick();
@@ -553,13 +580,29 @@
 
   function commitYearEdit() {
     if (!yearEditing) return;
+    const originalYear = visibleYear();
     const year = Number(yearDraft);
     yearEditing = false;
     if (!Number.isInteger(year) || year < 1000 || year > currentDay.getFullYear()) {
-      yearDraft = String(visibleYear());
+      yearDraft = String(originalYear);
       return;
     }
-    void jumpToMonth(`${String(year).padStart(4, '0')}-${String(visibleMonth()).padStart(2, '0')}`);
+
+    // Merely leaving the year field must not move the timeline. This is
+    // especially important when the next click is the month control.
+    if (year === originalYear) {
+      yearDraft = String(year);
+      return;
+    }
+
+    const month = visibleMonth();
+    if (year === currentDay.getFullYear() && month > currentDay.getMonth() + 1) {
+      yearDraft = String(currentDay.getFullYear());
+      void scrollToToday();
+      return;
+    }
+
+    void jumpToMonth(`${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`);
   }
 
   function cancelYearEdit() {
@@ -575,9 +618,12 @@
     if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return;
 
     const today = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
-    let target = new Date(year, month - 1, 1, 12);
+    const target = new Date(year, month - 1, 1, 12);
     const currentMonth = new Date(today.getFullYear(), today.getMonth(), 1, 12);
-    if (target > currentMonth) target = currentMonth;
+    if (target > currentMonth) {
+      await scrollToToday();
+      return;
+    }
 
     const metrics = timelineMetrics();
     if (!metrics || metrics.dayWidth <= 0) return;
@@ -596,6 +642,10 @@
     else scroller.scrollLeft = 0;
 
     updateTimelineStatus();
+    // Keep the picker synchronized with the month the user explicitly chose.
+    // Manual scrolling will take over again on the next scroll event.
+    setVisibleMonthState(year, month);
+    yearDraft = String(year);
   }
 
   async function scrollToToday() {
@@ -1104,6 +1154,10 @@
     const onOffline = () => (online = false);
     const onVisibility = () => document.visibilityState === 'visible' && void sync();
     const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
+    const onDocumentPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (monthMenuOpen && !target?.closest('.month-slot')) monthMenuOpen = false;
+    };
     const onResize = () => {
       updateMinimumVisibleDays();
       updateHistoryIntroWidth();
@@ -1122,6 +1176,7 @@
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
     window.addEventListener('scroll', onVerticalScroll, { passive: true });
+    document.addEventListener('pointerdown', onDocumentPointerDown);
     onVerticalScroll();
 
     syncTimer = setInterval(() => void sync(), 8000);
@@ -1135,6 +1190,7 @@
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', onResize);
       window.removeEventListener('scroll', onVerticalScroll);
+      document.removeEventListener('pointerdown', onDocumentPointerDown);
       if (syncTimer) clearInterval(syncTimer);
       if (dayTimer) clearTimeout(dayTimer);
       if (flushTimer) clearTimeout(flushTimer);
@@ -1158,16 +1214,27 @@
     <div class="navbar">
       <div class="brand-slot"><div class="brand">3tap</div></div>
       <div class="month-slot" aria-label={`Timeline month and year. Currently ${visibleMonthLabel}`}>
-        <select
-          class="month-select"
-          aria-label="Jump to month"
-          value={Number(visibleMonthValue.slice(5, 7))}
-          onchange={chooseMonth}
-        >
-          {#each monthOptions as monthName, index}
-            <option value={index + 1}>{monthName}</option>
-          {/each}
-        </select>
+        <div class="month-control">
+          <button
+            class="month-button"
+            aria-label={`Change month. Currently ${monthOptions[displayMonthIndex]}`}
+            aria-haspopup="true"
+            aria-expanded={monthMenuOpen}
+            onclick={toggleMonthMenu}
+          >{monthOptions[displayMonthIndex]}</button>
+          {#if monthMenuOpen}
+            <div class="month-menu" aria-label="Choose month">
+              {#each monthOptions as monthName, index}
+                <button
+                  class="month-option"
+                  class:selected={displayMonthIndex === index}
+                  aria-pressed={displayMonthIndex === index}
+                  onclick={() => chooseMonth(index + 1)}
+                >{monthName}</button>
+              {/each}
+            </div>
+          {/if}
+        </div>
         {#if yearEditing}
           <input
             class="year-input"
@@ -1186,7 +1253,7 @@
             }}
           />
         {:else}
-          <button class="year-button" aria-label={`Change year. Currently ${visibleMonthValue.slice(0, 4)}`} onclick={beginYearEdit}>{visibleMonthValue.slice(0, 4)}</button>
+          <button class="year-button" aria-label={`Change year. Currently ${displayYear}`} onclick={beginYearEdit}>{displayYear}</button>
         {/if}
       </div>
       <div class="nav-fill">{#if !online}<span class="offline" aria-live="polite">offline</span>{/if}</div>
@@ -1224,8 +1291,9 @@
                 </button>
                 <button class="tool-icon archive-tool" aria-label={`Archive${(board?.archivedHabits?.length ?? 0) > 0 ? `, ${board?.archivedHabits?.length ?? 0} items` : ''}`} title="Archive" onclick={openArchived}>
                   <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4.5 6.5h15v13h-15z"></path>
-                    <path d="M3.5 3.5h17v3h-17zM9 11.5h6"></path>
+                    <path d="M5.5 10v8.5h13V10"></path>
+                    <path d="M12 4.5v9"></path>
+                    <path d="M8.5 10l3.5 3.5 3.5-3.5"></path>
                   </svg>
                   {#if (board?.archivedHabits?.length ?? 0) > 0}<span class="archive-count">{board?.archivedHabits?.length ?? 0}</span>{/if}
                 </button>
@@ -1308,14 +1376,20 @@
                       <button class="habit-label" onclick={() => beginRename(habit)}>{habit.name}</button>
                     {/if}
                     <div class="habit-controls">
-                      <button disabled={habitIndex === 0} aria-label={`Move ${habit.name} up`} onclick={() => moveHabit(habitIndex, -1)}>↑</button>
-                      <button disabled={habitIndex === board.habits.length - 1} aria-label={`Move ${habit.name} down`} onclick={() => moveHabit(habitIndex, 1)}>↓</button>
+                      <button disabled={habitIndex === 0} aria-label={`Move ${habit.name} up`} onclick={() => moveHabit(habitIndex, -1)}>
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12V4M4.75 7.25 8 4l3.25 3.25" /></svg>
+                      </button>
+                      <button disabled={habitIndex === board.habits.length - 1} aria-label={`Move ${habit.name} down`} onclick={() => moveHabit(habitIndex, 1)}>
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 4v8m-3.25-3.25L8 12l3.25-3.25" /></svg>
+                      </button>
                       <button
                         class="delete-habit"
                         aria-label={`Archive ${habit.name}`}
                         title="Archive"
                         onclick={() => archiveHabit(habitIndex)}
-                      >×</button>
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 4.75 6.5 6.5m0-6.5-6.5 6.5" /></svg>
+                      </button>
                     </div>
                   </div>
                 </th>
@@ -1469,15 +1543,19 @@
     --bg: #f7f7f5;
     --surface: #fffffc;
     --text: #11110f;
-    --muted: #6e6e68;
-    --grid-weak-theme: #e2e2dd;
-    --grid-strong-theme: #b0b0a9;
-    --border: #d8d8d2;
-    --panel-border: #d6d6d0;
-    --hover: #ecece7;
-    --today-fill: rgba(17,17,15,.05);
-    --prestart-fill: rgba(17,17,15,.012);
-    --press-fill: rgba(17,17,15,.07);
+    --muted: #5f605a;
+    --control-text: #44453f;
+    --control-active: #11110f;
+    --grid-weak-theme: #deded8;
+    --grid-strong-theme: #a9aaa3;
+    --border: #d3d3cd;
+    --panel-border: #cecec8;
+    --hover: #e7e7e1;
+    --today-fill: rgba(17,17,15,.085);
+    --prestart-fill: rgba(17,17,15,.018);
+    --press-fill: rgba(17,17,15,.13);
+    --selection-bg: #b8d7ff;
+    --selection-text: #0b1b2b;
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
@@ -1489,15 +1567,19 @@
     --bg: #111210;
     --surface: #181916;
     --text: #ecece6;
-    --muted: #969790;
-    --grid-weak-theme: #2b2c29;
-    --grid-strong-theme: #585953;
-    --border: #393a36;
-    --panel-border: #444540;
-    --hover: #20211e;
-    --today-fill: rgba(255,255,248,.07);
-    --prestart-fill: rgba(255,255,248,.018);
-    --press-fill: rgba(255,255,248,.09);
+    --muted: #afb0a9;
+    --control-text: #c8c9c2;
+    --control-active: #f2f2ec;
+    --grid-weak-theme: #30312d;
+    --grid-strong-theme: #5f605a;
+    --border: #40413c;
+    --panel-border: #4a4b45;
+    --hover: #252620;
+    --today-fill: rgba(255,255,248,.115);
+    --prestart-fill: rgba(255,255,248,.028);
+    --press-fill: rgba(255,255,248,.16);
+    --selection-bg: #315f8f;
+    --selection-text: #ffffff;
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
@@ -1511,7 +1593,9 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     -webkit-font-smoothing: antialiased;
   }
-  :global(button), :global(input), :global(textarea) { font: inherit; }
+  :global(button), :global(input), :global(textarea), :global(select) { font: inherit; }
+  :global(::selection) { background: var(--selection-bg); color: var(--selection-text); }
+  :global(::-moz-selection) { background: var(--selection-bg); color: var(--selection-text); }
   :global(button) { color: inherit; }
   :global(html.habit-dragging-cursor),
   :global(html.habit-dragging-cursor *) { cursor: grabbing !important; }
@@ -1579,21 +1663,23 @@
     opacity: .5;
   }
   .month-slot {
+    position: relative;
     width: 100%;
-    justify-content: flex-start;
+    justify-content: center;
     gap: 6px;
-    padding: 0 0 0 var(--page-inset);
+    padding: 0;
+    overflow: visible;
     color: var(--text);
     font-size: 10px;
     letter-spacing: 0;
-    text-align: left;
+    text-align: center;
     white-space: nowrap;
   }
   .nav-fill { justify-content: flex-end; padding-right: 8px; }
   .today-slot { justify-content: flex-end; padding-right: var(--page-inset); }
   .offline { font-size: 10px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
-  .month-select,
+  .month-button,
   .year-button,
   .nav-today {
     height: auto;
@@ -1603,57 +1689,99 @@
     border-radius: 0;
     padding: 2px 0 3px;
     background: transparent;
-    color: var(--text);
+    color: var(--control-text);
     font: inherit;
     font-size: 10px;
     line-height: 1;
-    opacity: .5;
+    opacity: 1;
     white-space: nowrap;
   }
-  .month-select {
+  .month-control {
+    position: relative;
     width: 3.2em;
-    appearance: none;
-    -webkit-appearance: none;
-    cursor: pointer;
-    text-align: left;
+    flex: none;
   }
-  .year-button { width: 4ch; text-align: left; }
+  .month-button { width: 100%; text-align: center; }
+  .year-button { width: 4ch; text-align: center; }
   .nav-today { width: auto; text-align: right; }
   .year-input {
-    width: 4.35ch;
-    min-width: 4.35ch;
-    height: 22px;
+    width: 4ch;
+    min-width: 4ch;
+    height: auto;
+    min-height: 0;
+    margin: 0;
     border: 0;
-    border-bottom: 1px solid currentColor;
+    border-bottom: 1px solid var(--control-active);
     border-radius: 0;
     outline: none;
-    padding: 0;
+    box-shadow: none;
+    appearance: none;
+    -webkit-appearance: none;
+    display: block;
+    padding: 2px 0 3px;
     background: transparent;
-    color: var(--text);
+    color: var(--control-active);
     font: inherit;
     font-size: 10px;
     line-height: 1;
-    opacity: .9;
-    text-align: left;
+    opacity: 1;
+    text-align: center;
     caret-color: currentColor;
   }
-  .year-input::selection { background: var(--today-fill); }
-  .month-select:focus-visible,
+  .month-menu {
+    position: absolute;
+    z-index: 80;
+    top: 100%;
+    left: 0;
+    width: 100%;
+    max-height: min(432px, calc(100dvh - (var(--day-size) * 2) - 12px));
+    overflow-y: auto;
+    background: var(--bg);
+    border: var(--line) solid var(--grid);
+    scrollbar-width: thin;
+    scrollbar-color: var(--grid) transparent;
+  }
+  .month-menu::-webkit-scrollbar { width: 6px; }
+  .month-menu::-webkit-scrollbar-thumb { background: var(--grid); }
+  .month-option {
+    width: 100%;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border-bottom: var(--line) solid var(--grid);
+    background: var(--bg);
+    color: var(--control-text);
+    font-size: 10px;
+    line-height: 1;
+    text-align: center;
+  }
+  .month-option:last-child { border-bottom: 0; }
+  .month-option.selected {
+    background: var(--today-fill);
+    color: var(--control-active);
+  }
+  .month-option:focus-visible {
+    outline: 1px solid var(--control-active);
+    outline-offset: -2px;
+    color: var(--control-active);
+  }
+  .month-button:focus-visible,
   .year-button:focus-visible,
   .nav-today:focus-visible {
     outline: none;
-    border-bottom-color: currentColor;
-    opacity: .92;
+    color: var(--control-active);
+    border-bottom-color: var(--control-active);
   }
   @media (hover: hover) and (pointer: fine) {
     .tool-icon:hover { opacity: .92; }
-    .month-select:hover,
+    .month-button:hover,
     .year-button:hover,
     .nav-today:hover {
-      border-bottom-color: currentColor;
-      opacity: .92;
+      color: var(--control-active);
+      border-bottom-color: var(--control-active);
     }
-    .habit-controls button:not(:disabled):hover { opacity: .9; }
+    .month-option:hover { background: var(--hover); color: var(--control-active); }
+    .habit-controls button:not(:disabled):hover { opacity: 1; }
     .cell:not(:disabled):hover { background: var(--hover); }
     .grid-scroll { cursor: grab; }
     .habit-name { cursor: grab; }
@@ -1720,7 +1848,7 @@
     display: grid;
     place-items: center;
     color: var(--text);
-    opacity: .58;
+    opacity: .7;
     -webkit-tap-highlight-color: transparent;
   }
   .tool-icon svg {
@@ -1776,14 +1904,14 @@
     display: block;
     font-weight: 400;
     line-height: 1.15;
-    opacity: .5;
+    opacity: .62;
   }
   .day-head strong { font-size: 11px; }
   .day-head.today { background: var(--today-fill); }
   .day-head.today span,
-  .day-head.today strong { opacity: .8; }
+  .day-head.today strong { opacity: .96; }
   .day-head.prestart span,
-  .day-head.prestart strong { opacity: .26; }
+  .day-head.prestart strong { opacity: .34; }
   table {
     border-collapse: separate;
     border-spacing: 0;
@@ -1878,24 +2006,34 @@
   }
   .habit-controls {
     flex: none;
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, 32px);
     align-items: center;
+    justify-items: center;
     gap: 0;
     margin-left: auto;
   }
   .habit-controls button {
-    width: 30px;
-    height: 42px;
+    width: 32px;
+    height: 32px;
     display: grid;
     place-items: center;
-    font-size: 18px;
-    font-weight: 650;
-    line-height: 1;
-    opacity: .72;
+    color: var(--control-text);
+    opacity: .86;
     -webkit-tap-highlight-color: transparent;
   }
-  .habit-controls .delete-habit { font-size: 21px; }
-  .habit-controls button:disabled { opacity: .18; cursor: default; }
+  .habit-controls svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.65;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .habit-controls .delete-habit { color: var(--control-text); }
+  .habit-controls button:disabled { opacity: .22; cursor: default; }
   .habit-name {
     cursor: grab;
     touch-action: none;
@@ -1948,7 +2086,7 @@
     width: 100%;
     height: 100%;
     font-size: 11px;
-    opacity: .54;
+    opacity: .64;
     text-align: left;
   }
   .add-input { width: 100%; }
@@ -1971,17 +2109,17 @@
   }
   .cell.plus { font-weight: 750; font-size: 17px; }
   .cell:disabled { color: inherit; pointer-events: none; }
-  td.locked .cell { opacity: .58; }
-  td.prestart .cell { opacity: .26; }
+  td.locked .cell { opacity: .66; }
+  td.prestart .cell { opacity: .34; }
   td.today .cell { opacity: 1; }
-  td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .42; }
+  td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .52; }
   .cell:not(:disabled):active { background: var(--press-fill); }
 
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
   .panel { position: relative; width: min(390px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 24px; }
   .panel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: lowercase; }
   .panel p { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-  .close { position: absolute; top: 12px; right: 14px; font-size: 18px; opacity: .5; }
+  .close { position: absolute; top: 12px; right: 14px; font-size: 18px; opacity: .68; }
   .qr { display: block; width: min(280px, 100%); margin: 16px auto 20px; image-rendering: pixelated; }
   .action { border: 1px solid var(--text); padding: 9px 12px; font-size: 11px; }
   .text-button { font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
