@@ -11,16 +11,29 @@ function requireEnv(name: 'SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY') {
   return value;
 }
 
-export const db = createClient(
-  requireEnv('SUPABASE_URL'),
-  requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
+type DbClient = ReturnType<typeof createClient>;
+
+let client: DbClient | undefined;
+
+function getDb() {
+  return client ??= createClient(
+    requireEnv('SUPABASE_URL'),
+    requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
+    {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false
+      }
     }
+  );
+}
+
+export const db = new Proxy({} as DbClient, {
+  get(_target, property) {
+    const value = Reflect.get(getDb(), property);
+    return typeof value === 'function' ? value.bind(getDb()) : value;
   }
-);
+});
 
 export function hashSecret(secret: string) {
   return createHash('sha256').update(secret).digest('hex');
