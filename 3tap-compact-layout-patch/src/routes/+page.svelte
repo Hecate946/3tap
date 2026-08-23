@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { browser } from '$app/environment';
   import { flip } from 'svelte/animate';
+  import { slide } from 'svelte/transition';
   import { SvelteMap } from 'svelte/reactivity';
   import type { Board, Credentials, Entry, Habit, MarkValue } from '$lib/types';
   import {
@@ -22,6 +23,7 @@
   let credentials: Credentials | null = browser ? getCredentials() : null;
   let loading = !board;
   let online = true;
+  let menuOpen = false;
   let theme: 'light' | 'dark' = 'light';
   let navScrolled = false;
   let panel: 'none' | 'pair' | 'recovery' | 'archived' | 'delete' = 'none';
@@ -43,25 +45,18 @@
   let currentDay = new Date();
   let windowEndOffset = 0;
   let visibleMonthLabel = `${new Intl.DateTimeFormat(undefined, { month: 'short' }).format(currentDay).toUpperCase()} ${currentDay.getFullYear()}`;
-  let visibleMonthValue = `${currentDay.getFullYear()}-${String(currentDay.getMonth() + 1).padStart(2, '0')}`;
-  let yearEditing = false;
-  let yearDraft = String(currentDay.getFullYear());
-  let yearInput: HTMLInputElement;
-  const monthOptions = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   let showTodayButton = false;
   let shiftingWindow = false;
   let scrollRaf = 0;
   const WINDOW_DAYS = 84;
-  const WINDOW_SHIFT = 7;
+  const WINDOW_SHIFT = 28;
   let minimumVisibleDays = 32;
-  // Pre-start calendar columns are visual scaffolding only. They are never
-  // stored or editable, and the timeline may extend backward through them forever.
-  let historyIntroWidth = 0;
+  // Fixed 48px day cells + fixed 5-column label area let us calculate the
+  // default tutorial space before the first paint. DOM measurement refines it later.
+  let historyIntroWidth = browser && board
+    ? Math.max(0, window.innerWidth - 240 - realHistoryDays(board) * 48)
+    : 0;
   const pendingByCell = new Map<string, PendingEntry>();
-  // Tap-local values deliberately stay outside Svelte reactivity. The tapped
-  // cell is painted synchronously, while the habit-name column is left completely
-  // untouched until a real background sync arrives.
-  const localTapValues = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setInterval> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -98,9 +93,8 @@
   }
   if (credentials) {
     for (const change of compactQueue(getQueue())) {
+      pendingByCell.set(cellKey(change.habitId, change.date), change);
       const key = cellKey(change.habitId, change.date);
-      pendingByCell.set(key, change);
-      localTapValues.set(key, change);
       if (change.value === 0) entries.delete(key);
       else entries.set(key, { habitId: change.habitId, date: change.date, value: change.value as 1 | 2, updatedAt: '' });
     }
@@ -140,22 +134,31 @@
     return Math.floor((toUtc - fromUtc) / 86_400_000);
   }
 
-  function datesForWindow(source: Board | null, endDay: Date, endOffset: number): DayColumn[] {
-    if (!enrollmentDate(source)) return [];
+  function realHistoryDays(source: Board | null) {
+    const start = enrollmentDate(source);
+    if (!start) return 0;
+    const today = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
+    return Math.max(1, calendarDayDistance(start, today) + 1);
+  }
 
+  function earliestTimelineKey(source: Board | null) {
+    return enrollmentKey(source);
+  }
+
+  function datesForWindow(source: Board | null, endDay: Date, endOffset: number): DayColumn[] {
     const end = shiftedDate(endDay, endOffset);
-    // Keep a generously overlapping moving window. There is intentionally no
-    // enrollment-date clamp: dates before signup are calendar scaffolding, so
-    // the user can keep scrolling backward indefinitely.
     const windowDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
     const start = shiftedDate(end, -(windowDays - 1));
+    const earliest = earliestTimelineKey(source);
     const days: DayColumn[] = [];
     const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
     const month = new Intl.DateTimeFormat(undefined, { month: 'short' });
 
     for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+      const key = dateKey(cursor);
+      if (earliest && key < earliest) continue;
       days.push({
-        key: dateKey(cursor),
+        key,
         weekday: weekday.format(cursor),
         day: cursor.getDate(),
         month: month.format(cursor).toUpperCase(),
@@ -168,6 +171,7 @@
   $: dates = datesForWindow(board, currentDay, windowEndOffset);
   $: todayKey = dateKey(currentDay);
   $: enrolledKey = enrollmentKey(board);
+  $: earliestKey = earliestTimelineKey(board);
 
   function isPreEnrollment(date: string) {
     return Boolean(enrolledKey && date < enrolledKey);
@@ -194,8 +198,7 @@
   }
 
   function valueFor(habitId: string, date: string): MarkValue {
-    const key = cellKey(habitId, date);
-    return (localTapValues.get(key)?.value ?? entries.get(key)?.value ?? 0) as MarkValue;
+    return (entries.get(cellKey(habitId, date))?.value ?? 0) as MarkValue;
   }
 
   function applyLocalEntry(change: PendingEntry) {
@@ -220,10 +223,7 @@
   function persistLocalStateNow() {
     if (board) {
       const logicalEntries = new Map(entries);
-      const localChanges = new Map<string, PendingEntry>();
-      for (const change of localTapValues.values()) localChanges.set(cellKey(change.habitId, change.date), change);
-      for (const change of pendingChanges()) localChanges.set(cellKey(change.habitId, change.date), change);
-      for (const change of localChanges.values()) {
+      for (const change of pendingChanges()) {
         const key = cellKey(change.habitId, change.date);
         if (change.value === 0) logicalEntries.delete(key);
         else {
@@ -275,7 +275,7 @@
       button.setAttribute('aria-label', `${date}: ${symbols[next]}`);
     }
 
-    localTapValues.set(cellKey(habitId, date), change);
+    applyLocalEntry(change);
     queueChange(change);
   }
 
@@ -307,9 +307,6 @@
       ? { ...remoteBoard, habits: pendingHabitSave, archivedHabits: board?.archivedHabits ?? remoteBoard.archivedHabits }
       : remoteBoard;
     hydrateEntries(board);
-    for (const [key] of localTapValues) {
-      if (!pendingByCell.has(key)) localTapValues.delete(key);
-    }
     for (const change of pendingChanges()) applyLocalEntry(change);
     persistLocalStateNow();
   }
@@ -405,13 +402,18 @@
   }
 
   function updateHistoryIntroWidth() {
-    // Kept as a no-op so the existing scroll code stays simple. Empty timeline
-    // space is now filled with muted pre-start date columns instead of a spacer.
-    if (historyIntroWidth !== 0) {
+    if (!scroller || !board || windowEndOffset !== 0) {
       historyIntroWidth = 0;
-      return true;
+      return false;
     }
-    return false;
+    const metrics = timelineMetrics();
+    if (!metrics || metrics.dayWidth <= 0) return false;
+    const timelineWidth = Math.max(0, scroller.clientWidth - metrics.habitWidth);
+    const historyWidth = realHistoryDays(board) * metrics.dayWidth;
+    const next = Math.max(0, Math.round(timelineWidth - historyWidth));
+    if (Math.abs(next - historyIntroWidth) < 1) return false;
+    historyIntroWidth = next;
+    return true;
   }
 
   function updateTimelineStatus() {
@@ -419,31 +421,38 @@
     const metrics = timelineMetrics();
     if (!metrics) return;
 
-    // The month label describes the first visible calendar column, which makes
-    // its placement directly beside the habit/timeline divider feel literal.
-    const index = Math.max(0, Math.min(dates.length - 1, Math.floor(scroller.scrollLeft / metrics.dayWidth)));
+    const timelineWidth = Math.max(0, scroller.clientWidth - metrics.habitWidth);
+    const centerInTimeline = scroller.scrollLeft + timelineWidth / 2 - historyIntroWidth;
+    const index = Math.max(0, Math.min(dates.length - 1, Math.floor(centerInTimeline / metrics.dayWidth)));
     const date = dates[index];
     visibleMonthLabel = `${date.month} ${date.year}`;
-    visibleMonthValue = date.key.slice(0, 7);
 
     const rightGap = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft;
-    showTodayButton = windowEndOffset < 0 || rightGap > 2;
+    showTodayButton = windowEndOffset < 0 || rightGap > metrics.dayWidth * 1.25;
+  }
+
+  function scrollAnchor(metrics: { dayWidth: number; habitWidth: number }) {
+    if (!scroller || !dates.length) return null;
+    const timelineLeft = Math.max(0, scroller.scrollLeft - metrics.habitWidth - historyIntroWidth);
+    const index = Math.max(0, Math.min(dates.length - 1, Math.floor(timelineLeft / metrics.dayWidth)));
+    return {
+      key: dates[index].key,
+      offset: timelineLeft - index * metrics.dayWidth
+    };
   }
 
   async function shiftTimelineWindow(delta: number, metrics: { dayWidth: number; habitWidth: number }) {
     if (!scroller || delta === 0) return;
-
-    // Recycle a fixed number of calendar columns and compensate by the exact
-    // same pixel width. If a desktop pointer-drag is active, move its baseline
-    // by the same amount; otherwise the next pointermove would undo the
-    // compensation and trigger rapid repeated recycling (the apparent speed-up).
+    const anchor = scrollAnchor(metrics);
     windowEndOffset += delta;
     await tick();
-    const beforeCompensation = scroller.scrollLeft;
-    const compensation = -delta * metrics.dayWidth;
-    scroller.scrollLeft = Math.max(0, beforeCompensation + compensation);
-    const appliedCompensation = scroller.scrollLeft - beforeCompensation;
-    if (timelinePanPointerId !== null) timelinePanStartScrollLeft += appliedCompensation;
+
+    if (anchor) {
+      const nextIndex = dates.findIndex((date) => date.key === anchor.key);
+      if (nextIndex >= 0) {
+        scroller.scrollLeft = metrics.habitWidth + historyIntroWidth + nextIndex * metrics.dayWidth + anchor.offset;
+      }
+    }
   }
 
   async function maintainTimelineWindow() {
@@ -451,10 +460,10 @@
     const metrics = timelineMetrics();
     if (!metrics) return;
 
-    const threshold = metrics.dayWidth * 6;
+    const threshold = metrics.dayWidth * 7;
     const rightGap = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft;
 
-    if (scroller.scrollLeft < threshold && dates.length) {
+    if (scroller.scrollLeft < threshold && dates[0]?.key > earliestKey) {
       shiftingWindow = true;
       await shiftTimelineWindow(-WINDOW_SHIFT, metrics);
       shiftingWindow = false;
@@ -519,85 +528,6 @@
     document.documentElement.classList.remove('timeline-panning-cursor');
   }
 
-  function visibleYear() {
-    return Number(visibleMonthValue.slice(0, 4)) || currentDay.getFullYear();
-  }
-
-  function visibleMonth() {
-    return Number(visibleMonthValue.slice(5, 7)) || currentDay.getMonth() + 1;
-  }
-
-  function chooseMonth(event: Event) {
-    const month = Number((event.currentTarget as HTMLSelectElement).value);
-    if (!Number.isInteger(month) || month < 1 || month > 12) return;
-    void jumpToMonth(`${String(visibleYear()).padStart(4, '0')}-${String(month).padStart(2, '0')}`);
-  }
-
-  async function beginYearEdit() {
-    yearDraft = String(visibleYear());
-    yearEditing = true;
-    await tick();
-    yearInput?.focus();
-    yearInput?.select();
-  }
-
-  function sanitizeYearInput(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    let digits = input.value.replace(/\D/g, '').slice(0, 4);
-    if (digits.length === 4 && Number(digits) > currentDay.getFullYear()) {
-      digits = String(currentDay.getFullYear());
-    }
-    yearDraft = digits;
-    if (input.value !== digits) input.value = digits;
-  }
-
-  function commitYearEdit() {
-    if (!yearEditing) return;
-    const year = Number(yearDraft);
-    yearEditing = false;
-    if (!Number.isInteger(year) || year < 1000 || year > currentDay.getFullYear()) {
-      yearDraft = String(visibleYear());
-      return;
-    }
-    void jumpToMonth(`${String(year).padStart(4, '0')}-${String(visibleMonth()).padStart(2, '0')}`);
-  }
-
-  function cancelYearEdit() {
-    yearDraft = String(visibleYear());
-    yearEditing = false;
-  }
-
-  async function jumpToMonth(value: string) {
-    if (!scroller || !/^\d{4}-\d{2}$/.test(value)) return;
-    const [yearText, monthText] = value.split('-');
-    const year = Number(yearText);
-    const month = Number(monthText);
-    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return;
-
-    const today = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
-    let target = new Date(year, month - 1, 1, 12);
-    const currentMonth = new Date(today.getFullYear(), today.getMonth(), 1, 12);
-    if (target > currentMonth) target = currentMonth;
-
-    const metrics = timelineMetrics();
-    if (!metrics || metrics.dayWidth <= 0) return;
-    const timelineWidth = Math.max(metrics.dayWidth, scroller.clientWidth - metrics.habitWidth);
-    const visibleDays = Math.max(1, Math.floor(timelineWidth / metrics.dayWidth));
-    const targetOffset = calendarDayDistance(today, target);
-
-    // End the moving window just far enough after the selected month start to
-    // place that date at the left edge of the visible timeline.
-    windowEndOffset = Math.min(0, targetOffset + visibleDays - 1);
-    await tick();
-
-    const targetKey = dateKey(target);
-    const targetIndex = dates.findIndex((date) => date.key === targetKey);
-    if (targetIndex >= 0) scroller.scrollLeft = targetIndex * metrics.dayWidth;
-    else scroller.scrollLeft = 0;
-
-    updateTimelineStatus();
-  }
-
   async function scrollToToday() {
     windowEndOffset = 0;
     await tick();
@@ -611,6 +541,7 @@
 
   async function openPair() {
     if (!credentials) return;
+    menuOpen = false;
     panel = 'pair';
     const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
     if (pairingLink !== nextLink) {
@@ -938,6 +869,7 @@
   }
 
   function openArchived() {
+    menuOpen = false;
     panel = 'archived';
   }
 
@@ -1001,6 +933,7 @@
   }
 
   function openRecovery() {
+    menuOpen = false;
     recoveryInput = credentials ? `${credentials.boardId}.${credentials.secret}` : '';
     panel = 'recovery';
   }
@@ -1027,6 +960,19 @@
 
   async function copyText(text: string) {
     await navigator.clipboard.writeText(text);
+  }
+
+  function exportData() {
+    if (!board) return;
+    persistLocalStateNow();
+    const blob = new Blob([JSON.stringify(board, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `3tap-${todayKey}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    menuOpen = false;
   }
 
   function scheduleNextDay() {
@@ -1063,16 +1009,10 @@
     if (!board) board = getCachedBoard();
 
     pendingByCell.clear();
-    localTapValues.clear();
     for (const change of compactQueue(getQueue())) {
-      const key = cellKey(change.habitId, change.date);
-      pendingByCell.set(key, change);
-      localTapValues.set(key, change);
+      pendingByCell.set(cellKey(change.habitId, change.date), change);
     }
-    if (!credentials) {
-      pendingByCell.clear();
-      localTapValues.clear();
-    }
+    if (!credentials) pendingByCell.clear();
     hydrateEntries(board);
     for (const change of pendingChanges()) applyLocalEntry(change);
 
@@ -1156,54 +1096,45 @@
 <div class="shell">
   <header class="nav-shell" class:scrolled={navScrolled}>
     <div class="navbar">
-      <div class="brand-slot"><div class="brand">3tap</div></div>
-      <div class="month-slot" aria-label={`Timeline month and year. Currently ${visibleMonthLabel}`}>
-        <select
-          class="month-select"
-          aria-label="Jump to month"
-          value={Number(visibleMonthValue.slice(5, 7))}
-          onchange={chooseMonth}
+      <div class="brand">3tap</div>
+      <nav class="nav-actions" aria-label="App controls">
+        {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+        <button
+          class="theme-toggle"
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          onclick={toggleTheme}
+        >{theme === 'dark' ? '☀' : '☾'}</button>
+        <button
+          class="hamburger-button"
+          class:open={menuOpen}
+          aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={menuOpen}
+          onclick={() => (menuOpen = !menuOpen)}
         >
-          {#each monthOptions as monthName, index}
-            <option value={index + 1}>{monthName}</option>
-          {/each}
-        </select>
-        {#if yearEditing}
-          <input
-            class="year-input"
-            bind:this={yearInput}
-            value={yearDraft}
-            aria-label="Jump to year"
-            inputmode="numeric"
-            pattern="[0-9]*"
-            maxlength="4"
-            autocomplete="off"
-            oninput={sanitizeYearInput}
-            onblur={commitYearEdit}
-            onkeydown={(event) => {
-              if (event.key === 'Enter') event.currentTarget.blur();
-              if (event.key === 'Escape') cancelYearEdit();
-            }}
-          />
-        {:else}
-          <button class="year-button" aria-label={`Change year. Currently ${visibleMonthValue.slice(0, 4)}`} onclick={beginYearEdit}>{visibleMonthValue.slice(0, 4)}</button>
-        {/if}
-      </div>
-      <div class="nav-fill">{#if !online}<span class="offline" aria-live="polite">offline</span>{/if}</div>
-      <div class="today-slot">
-        {#if showTodayButton}
-          <button class="nav-today" aria-label="Jump to today" onclick={scrollToToday}>today →</button>
-        {/if}
-      </div>
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+      </nav>
     </div>
+    {#if menuOpen}
+      <div class="nav-popover" transition:slide={{ duration: 180, axis: 'y' }}>
+        <button class="menu-item" onclick={openPair}>add device</button>
+        <button class="menu-item" onclick={openArchived}>
+          archived{#if (board?.archivedHabits?.length ?? 0) > 0}<span class="menu-count">{board?.archivedHabits?.length ?? 0}</span>{/if}
+        </button>
+        <button class="menu-item" onclick={openRecovery}>recovery</button>
+        <button class="menu-item" onclick={exportData}>export</button>
+        <div class="menu-status" aria-live="polite">{online ? 'synced' : 'offline'}</div>
+      </div>
+    {/if}
   </header>
 
   {#if board}
     <main>
       <div
         class="grid-scroll"
-        role="region"
-        aria-label="Habit timeline"
         bind:this={scroller}
         onscroll={onTimelineScroll}
         onpointerdown={startTimelinePan}
@@ -1212,67 +1143,35 @@
         onpointercancel={endTimelinePan}
       >
         <div class="grid-frame">
-          <div class="timeline-header" aria-label="Timeline">
-            <div class="timeline-side">
-              <nav class="timeline-controls" aria-label="App controls">
-                <button class="tool-icon" aria-label="Add device" title="Add device" onclick={openPair}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="5.5" y="3.5" width="9" height="17" rx="1.5"></rect>
-                    <path d="M8.5 17.5h3"></path>
-                    <path d="M18.5 8v6M15.5 11h6"></path>
-                  </svg>
-                </button>
-                <button class="tool-icon archive-tool" aria-label={`Archive${(board?.archivedHabits?.length ?? 0) > 0 ? `, ${board?.archivedHabits?.length ?? 0} items` : ''}`} title="Archive" onclick={openArchived}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4.5 6.5h15v13h-15z"></path>
-                    <path d="M3.5 3.5h17v3h-17zM9 11.5h6"></path>
-                  </svg>
-                  {#if (board?.archivedHabits?.length ?? 0) > 0}<span class="archive-count">{board?.archivedHabits?.length ?? 0}</span>{/if}
-                </button>
-                <button class="tool-icon" aria-label="Recovery" title="Recovery" onclick={openRecovery}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <circle cx="8" cy="12" r="3.5"></circle>
-                    <path d="M11.5 12h8M16.5 12v3M19.5 12v2"></path>
-                  </svg>
-                </button>
-                <button
-                  class="tool-icon theme-toggle"
-                  aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-                  title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
-                  onclick={toggleTheme}
-                >
-                  {#if theme === 'dark'}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <circle cx="12" cy="12" r="3.5"></circle>
-                      <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"></path>
-                    </svg>
-                  {:else}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M18.5 15.2A7.5 7.5 0 0 1 8.8 5.5 7.5 7.5 0 1 0 18.5 15.2z"></path>
-                    </svg>
-                  {/if}
-                </button>
-              </nav>
-            </div>
-            {#if historyIntroWidth > 0}
-              <div
-                class="history-head-spacer"
-                style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
-                aria-hidden="true"
-              ></div>
-            {/if}
-            <div class="day-head-strip">
-              {#each dates as date (date.key)}
-                <div
-                  class="day-head"
-                  class:today={date.key === todayKey}
-                  class:enrolled={date.key === enrolledKey}
-                  class:prestart={isPreEnrollment(date.key)}
-                >
-                  <span>{date.weekday}</span>
-                  <strong>{date.day}</strong>
-                </div>
-              {/each}
+          <div class="timeline-header" aria-label="Timeline context">
+            <div class="timeline-side"></div>
+            <div class="timeline-main">
+              <div class="timeline-context">
+                <span class="month-label">{visibleMonthLabel}</span>
+                {#if showTodayButton}
+                  <button class="today-button" aria-label="Jump to today" onclick={scrollToToday}>today →</button>
+                {/if}
+              </div>
+              <div class="day-head-strip">
+                {#if historyIntroWidth > 0}
+                  <div
+                    class="history-head-spacer"
+                    style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
+                    aria-hidden="true"
+                  ></div>
+                {/if}
+                {#each dates as date (date.key)}
+                  <div
+                    class="day-head"
+                    class:today={date.key === todayKey}
+                    class:enrolled={date.key === enrolledKey}
+                    class:prestart={isPreEnrollment(date.key)}
+                  >
+                    <span>{date.weekday}</span>
+                    <strong>{date.day}</strong>
+                  </div>
+                {/each}
+              </div>
             </div>
           </div>
           <table>
@@ -1281,7 +1180,7 @@
               <tr
                 data-habit-id={habit.id}
                 class:dragging={dragActive && draggingHabitId === habit.id}
-                animate:flip={{ duration: dragActive ? 120 : 0 }}
+                animate:flip={{ duration: 120 }}
               >
                 <th
                   class="habit-name"
@@ -1385,6 +1284,25 @@
             </tr>
           </tbody>
         </table>
+        {#if historyIntroWidth > 0}
+          <div
+            class="history-intro-overlay"
+            style={`left:var(--habit-width); width:${historyIntroWidth}px; height:max(calc(var(--day-size) * ${Math.max(board.habits.length, 3)}), calc(var(--day-size) * 3))`}
+            aria-hidden="true"
+          >
+            <div class="history-tutorial">
+              <strong>Your history will appear here over time.</strong>
+              <span>Tap today to mark habits.</span>
+            </div>
+          </div>
+          {#if board.habits.length > 0}
+            <div
+              class="history-bottom-rule"
+              style={`left:var(--habit-width); width:${historyIntroWidth}px; top:${48 + board.habits.length * 48 - 1}px`}
+              aria-hidden="true"
+            ></div>
+          {/if}
+        {/if}
         </div>
       </div>
     </main>
@@ -1423,7 +1341,7 @@
           <button class="action" onclick={useRecoveryCode}>use code</button>
         </div>
       {:else if panel === 'archived'}
-        <h2>archive</h2>
+        <h2>archived</h2>
         {#if (board?.archivedHabits?.length ?? 0) === 0}
           <p>no archived habits.</p>
         {:else}
@@ -1520,7 +1438,7 @@
 
   .shell {
     --day-size: 48px;
-    --habit-width: calc(var(--day-size) * 6);
+    --habit-width: calc(var(--day-size) * 5);
     --line: 1px;
     --grid: var(--grid-weak-theme);
     --grid-weak: var(--grid);
@@ -1540,126 +1458,112 @@
   }
   .nav-shell.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
   .navbar {
-    position: relative;
     height: calc(var(--day-size) + env(safe-area-inset-top));
     min-height: calc(var(--day-size) + env(safe-area-inset-top));
-    display: grid;
-    grid-template-columns: var(--habit-width) calc(var(--day-size) * 2) minmax(0, 1fr) calc(var(--day-size) * 2);
-    align-items: stretch;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     width: 100%;
-    padding-top: env(safe-area-inset-top);
+    padding: env(safe-area-inset-top) var(--page-inset) 0;
     background: var(--bg);
     border-bottom: var(--line) solid var(--grid);
   }
-  .navbar::after {
-    content: '';
-    position: absolute;
-    z-index: 2;
-    top: 0;
-    bottom: 0;
-    left: var(--habit-width);
-    width: var(--line);
-    background: var(--grid);
-    pointer-events: none;
-  }
-  .brand-slot,
-  .month-slot,
-  .nav-fill,
-  .today-slot {
-    min-width: 0;
-    height: var(--day-size);
-    display: flex;
-    align-items: center;
-  }
-  .brand-slot { padding-left: var(--page-inset); }
   .brand {
+    flex: none;
     font-size: 12px;
     letter-spacing: .08em;
     text-transform: lowercase;
     opacity: .5;
   }
-  .month-slot {
-    width: 100%;
-    justify-content: flex-start;
-    gap: 6px;
-    padding: 0 0 0 var(--page-inset);
-    color: var(--text);
-    font-size: 10px;
-    letter-spacing: 0;
-    text-align: left;
-    white-space: nowrap;
+  .nav-actions {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
   }
-  .nav-fill { justify-content: flex-end; padding-right: 8px; }
-  .today-slot { justify-content: flex-end; padding-right: var(--page-inset); }
   .offline { font-size: 10px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
-  .month-select,
-  .year-button,
-  .nav-today {
-    height: auto;
-    min-height: 0;
-    border: 0;
-    border-bottom: 1px solid transparent;
-    border-radius: 0;
-    padding: 2px 0 3px;
-    background: transparent;
+  .theme-toggle,
+  .hamburger-button {
+    position: relative;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
     color: var(--text);
-    font: inherit;
-    font-size: 10px;
+    opacity: .62;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .theme-toggle {
+    font-size: 15px;
     line-height: 1;
-    opacity: .5;
-    white-space: nowrap;
   }
-  .month-select {
-    width: 3.2em;
-    appearance: none;
-    -webkit-appearance: none;
-    cursor: pointer;
-    text-align: left;
+  .hamburger-button span {
+    position: absolute;
+    width: 15px;
+    height: 1px;
+    background: currentColor;
+    transition: transform 220ms ease, opacity 140ms linear, top 220ms ease;
   }
-  .year-button { width: 4ch; text-align: left; }
-  .nav-today { width: auto; text-align: right; }
-  .year-input {
-    width: 4.35ch;
-    min-width: 4.35ch;
-    height: 22px;
-    border: 0;
-    border-bottom: 1px solid currentColor;
-    border-radius: 0;
-    outline: none;
-    padding: 0;
-    background: transparent;
+  .hamburger-button span:nth-child(1) { top: 11px; }
+  .hamburger-button span:nth-child(2) { top: 16px; }
+  .hamburger-button span:nth-child(3) { top: 21px; }
+  .hamburger-button.open span:nth-child(1) { top: 16px; transform: rotate(45deg); }
+  .hamburger-button.open span:nth-child(2) { opacity: 0; }
+  .hamburger-button.open span:nth-child(3) { top: 16px; transform: rotate(-45deg); }
+  .nav-popover {
+    position: absolute;
+    top: calc(100% - 1px);
+    right: var(--page-inset);
+    z-index: 45;
+    width: min(200px, calc(100vw - (var(--page-inset) * 2)));
+    display: grid;
+    gap: 2px;
+    padding: 10px 0 8px;
+    background: var(--bg);
+    border: var(--line) solid var(--grid);
+    box-shadow: 0 10px 28px var(--shadow);
+    transform-origin: top right;
+  }
+  .menu-item,
+  .menu-status {
+    min-width: 0;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0 12px;
     color: var(--text);
-    font: inherit;
-    font-size: 10px;
-    line-height: 1;
-    opacity: .9;
     text-align: left;
-    caret-color: currentColor;
+    font-size: 11px;
+    opacity: .72;
   }
-  .year-input::selection { background: var(--today-fill); }
-  .month-select:focus-visible,
-  .year-button:focus-visible,
-  .nav-today:focus-visible {
-    outline: none;
-    border-bottom-color: currentColor;
-    opacity: .92;
+  .menu-status {
+    color: var(--muted);
+    font-size: 10px;
+    cursor: default;
+  }
+  .menu-count {
+    margin-left: 6px;
+    color: var(--muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
   }
   @media (hover: hover) and (pointer: fine) {
-    .tool-icon:hover { opacity: .92; }
-    .month-select:hover,
-    .year-button:hover,
-    .nav-today:hover {
-      border-bottom-color: currentColor;
-      opacity: .92;
-    }
+    .hamburger-button:hover,
+    .theme-toggle:hover { opacity: .92; }
+    .menu-item:hover { opacity: 1; }
     .habit-controls button:not(:disabled):hover { opacity: .9; }
     .cell:not(:disabled):hover { background: var(--hover); }
+    .today-button:hover { opacity: .9; }
     .grid-scroll { cursor: grab; }
     .habit-name { cursor: grab; }
   }
 
   main { width: 100%; padding-bottom: 24px; }
+  .center { min-height: 60dvh; display: grid; place-items: center; font-size: 12px; opacity: .55; }
   .grid-scroll {
     position: relative;
     width: 100%;
@@ -1669,7 +1573,6 @@
     scrollbar-width: none;
     -ms-overflow-style: none;
     -webkit-overflow-scrolling: touch;
-    scroll-behavior: auto;
   }
   .grid-scroll::-webkit-scrollbar { display: none; }
   .grid-frame {
@@ -1694,59 +1597,40 @@
     min-width: var(--habit-width);
     max-width: var(--habit-width);
     background: var(--bg);
+    border-right: var(--line) solid var(--grid);
   }
-  .timeline-side::after {
-    content: '';
-    position: absolute;
-    z-index: 9;
-    top: 0;
-    bottom: 0;
-    right: calc(-1 * var(--line));
-    width: var(--line);
-    background: var(--grid);
-    pointer-events: none;
-  }
-  .timeline-controls {
-    width: 100%;
-    height: var(--day-size);
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    align-items: stretch;
-  }
-  .tool-icon {
+  .timeline-main {
     position: relative;
-    width: 100%;
-    height: 100%;
-    display: grid;
-    place-items: center;
-    color: var(--text);
-    opacity: .58;
-    -webkit-tap-highlight-color: transparent;
+    min-height: var(--day-size);
+    background: var(--bg);
   }
-  .tool-icon svg {
-    width: 18px;
-    height: 18px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.35;
-    stroke-linecap: round;
-    stroke-linejoin: round;
+  .timeline-context {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 0 12px;
     pointer-events: none;
   }
-  .archive-count {
-    position: absolute;
-    top: 7px;
-    left: calc(50% + 7px);
-    min-width: 12px;
-    height: 12px;
-    display: grid;
-    place-items: center;
-    padding: 0 2px;
-    background: var(--bg);
+  .month-label {
+    white-space: nowrap;
     color: var(--muted);
-    font-size: 8px;
-    line-height: 1;
-    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+    letter-spacing: .05em;
+    opacity: .8;
+  }
+  .today-button {
+    pointer-events: auto;
+    height: 22px;
+    min-height: 22px;
+    padding: 0;
+    color: var(--text);
+    font-size: 10px;
+    opacity: .54;
+    white-space: nowrap;
   }
   .day-head-strip {
     position: relative;
@@ -1810,6 +1694,7 @@
     height: var(--day-size);
     padding: 0;
     background: var(--bg);
+    border-bottom-color: transparent !important;
   }
   .history-intro-add-spacer {
     height: var(--day-size);
@@ -1817,6 +1702,41 @@
     border: 0;
     background: var(--bg);
   }
+  .history-intro-overlay {
+    position: absolute;
+    z-index: 4;
+    top: var(--day-size);
+    display: grid;
+    place-items: center;
+    min-height: calc(var(--day-size) * 3);
+    padding: 18px;
+    background: var(--bg);
+    pointer-events: none;
+  }
+  .history-bottom-rule {
+    position: absolute;
+    z-index: 8;
+    height: var(--line);
+    background: var(--grid);
+    pointer-events: none;
+  }
+  .history-tutorial {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    max-width: 340px;
+    color: var(--muted);
+    text-align: center;
+    font-size: 10px;
+    line-height: 1.45;
+    letter-spacing: .01em;
+  }
+  .history-tutorial strong {
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .history-tutorial span { opacity: .72; }
   /* Vertical rules begin at the first habit row and never enter the header band. */
   tbody tr:not(.add-row) td:not(.history-intro-row):not(.history-intro-add-spacer) { position: relative; }
   tbody tr:not(.add-row) td:not(.history-intro-row):not(.history-intro-add-spacer)::before {
@@ -1854,7 +1774,7 @@
     z-index: 9;
     top: 0;
     bottom: -1px;
-    right: calc(-1 * var(--line));
+    right: 0;
     width: var(--line);
     background: var(--grid);
     pointer-events: none;
