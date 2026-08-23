@@ -1602,17 +1602,16 @@
     <main></main>
   {/if}
 
+  {#if dragActive}
+    <div
+      class="habit-drag-preview"
+      style={`left:${dragPreviewLeft}px; top:${dragPreviewTop}px; width:${dragPreviewWidth}px; height:${dragPreviewHeight}px`}
+      aria-hidden="true"
+    >
+      <span>{dragPreviewName}</span>
+    </div>
+  {/if}
 </div>
-
-{#if dragActive}
-  <div
-    class="habit-drag-preview"
-    style={`left:${dragPreviewLeft}px; top:${dragPreviewTop}px; width:${dragPreviewWidth}px; height:${dragPreviewHeight}px`}
-    aria-hidden="true"
-  >
-    <span>{dragPreviewName}</span>
-  </div>
-{/if}
 
 {#if panel !== 'none'}
   <div class="backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (panel = 'none')}>
@@ -2271,6 +2270,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     z-index: 250;
     display: flex;
     align-items: center;
+    box-sizing: border-box;
     padding: 0 8px 0 var(--page-inset);
     background: var(--surface);
     box-shadow: 0 0 0 1px var(--border), 0 10px 28px var(--shadow);

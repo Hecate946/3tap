@@ -3,8 +3,10 @@ import { createClient } from '@supabase/supabase-js';
 import { env } from '$env/dynamic/private';
 import { error, type RequestEvent } from '@sveltejs/kit';
 
+const DEFAULT_SUPABASE_URL = 'https://zxglxdnbkxlghssjppjh.supabase.co';
+
 function requireEnv(name: 'SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY') {
-  const value = env[name];
+  const value = env[name] || (name === 'SUPABASE_URL' ? DEFAULT_SUPABASE_URL : '');
   if (!value) throw new Error(`${name} is not configured`);
   return value;
 }
