@@ -1,42 +1,16 @@
-# 3tap
+3tap habit reorder polish
 
-a tiny habit tracker.
+- smoother drag-to-reorder on desktop + mobile
+- vertical-intent thresholds prevent accidental drags
+- horizontal movement in the habit rail cancels reorder instead of fighting the UI
+- fixed 48px geometry avoids repeated DOM measurements while dragging
+- surrounding rows move one slot at a time for predictable ordering
+- dragging near the top/bottom auto-scrolls long habit lists
+- remote sync pauses during an active drag, then saves once on drop
+- zero-state + habit row remains excluded from timeline panning
+- floating drag preview uses GPU transform instead of changing layout position every frame
 
-`-` missed · `|` done · `+` great
-
-only today is editable. old days lock. drag habits to reorder them. no login, no streaks, no charts.
-
-boards are anonymous and sync through supabase. pair another device with the qr code, or save the recovery phrase somewhere safe.
-
-## local
-
-Docker needs to be running.
-
-```bash
-npm run dev
-```
-
-that starts local Supabase, applies migrations, and runs the site at `http://localhost:5173`.
-
-useful stuff:
-
-```bash
-npm run check
-npm run db:reset
-npm run db:stop
-```
-
-## prod
-
-Cloudflare Worker + Supabase.
-
-`SUPABASE_URL` lives in `wrangler.jsonc` because it isn't secret.
-
-Cloudflare keeps these as secrets:
-
-- `SUPABASE_SERVICE_ROLE_KEY` — Worker runtime
-- `SUPABASE_DB_URL` — build-time migrations
-
-push to GitHub and Cloudflare builds/deploys it.
-
-`/api/health` is there when prod is acting weird.
+Apply from the 3tap project root:
+  unzip -o ~/Downloads/3tap-reorder-smooth-patch.zip
+  npm run check
+  npm run dev

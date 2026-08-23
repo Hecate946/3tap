@@ -2000,19 +2000,19 @@
     border-bottom-color: var(--control-active);
   }
   @media (hover: hover) and (pointer: fine) {
-    .tool-icon:hover::before { opacity: .12; }
-    .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
-    .panel-button-danger:not(:disabled):hover { color: var(--danger); }
-    .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
-    .month-button:hover,
-    .year-button:hover,
-    .nav-today:hover {
+    :global(html:not(.habit-dragging-cursor)) .tool-icon:hover::before { opacity: .12; }
+    :global(html:not(.habit-dragging-cursor)) .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
+    :global(html:not(.habit-dragging-cursor)) .panel-button-danger:not(:disabled):hover { color: var(--danger); }
+    :global(html:not(.habit-dragging-cursor)) .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
+    :global(html:not(.habit-dragging-cursor)) .month-button:hover,
+    :global(html:not(.habit-dragging-cursor)) .year-button:hover,
+    :global(html:not(.habit-dragging-cursor)) .nav-today:hover {
       color: var(--control-active);
       border-bottom-color: var(--control-active);
     }
-    .month-option:hover { background: var(--hover); color: var(--control-active); }
-    .habit-controls button:not(:disabled):hover { opacity: 1; }
-    .cell:not(:disabled):hover { background: var(--hover); }
+    :global(html:not(.habit-dragging-cursor)) .month-option:hover { background: var(--hover); color: var(--control-active); }
+    :global(html:not(.habit-dragging-cursor)) .habit-controls button:not(:disabled):hover { opacity: 1; }
+    :global(html:not(.habit-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
     .grid-scroll { cursor: grab; }
     .habit-name { cursor: grab; }
   }
@@ -2271,16 +2271,13 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     z-index: 250;
     display: flex;
     align-items: center;
-    padding: 0 10px 0 var(--page-inset);
+    padding: 0 8px 0 var(--page-inset);
     background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: 0 10px 28px var(--shadow);
+    box-shadow: 0 0 0 1px var(--border), 0 10px 28px var(--shadow);
     font-size: 12px;
-    font-weight: 550;
+    font-weight: 500;
     pointer-events: none;
-    transform: scale(1.015);
-    transform-origin: center;
-    will-change: top, transform;
+    will-change: top;
   }
   .habit-inline-input {
     flex: 1;
