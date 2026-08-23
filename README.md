@@ -2,112 +2,70 @@
 
 **three states. one tap.**
 
-A tiny three-state daily habit grid for **3tap.cc**.
+A tiny, accountless three-state habit grid for **3tap.cc**.
 
-Each cell cycles:
-
-`-` → `|` → `+` → `-`
-
-No accounts. A board is created automatically on first visit. To sync another device, scan the pairing QR code or open the sync link. Possession of the board secret is the authentication model.
-
-## Stack
-
-- SvelteKit 2 + Svelte 5
-- Supabase Postgres
-- Vercel
-- PWA service worker
-- QR device pairing
-
-## Local setup
-
-1. Create a Supabase project.
-2. Open the Supabase SQL editor and run `supabase/schema.sql`.
-3. Copy `.env.example` to `.env` and fill in:
+## Normal workflow
 
 ```bash
-cp .env.example .env
-```
-
-```env
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
-```
-
-4. Install and run:
-
-```bash
-npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+That is the entire local workflow. 3tap automatically starts a private local Supabase/Postgres instance, applies any pending migrations, injects its local API credentials into SvelteKit, and starts Vite.
 
-## Deploy to 3tap.cc
+Local data never touches production. It persists in Docker between restarts.
 
-1. Push this repository to GitHub.
-2. Import it into Vercel.
-3. Add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in Vercel → Project Settings → Environment Variables.
-4. Deploy.
-5. In Vercel → Project Settings → Domains, add `3tap.cc` and `www.3tap.cc`.
-6. In Namecheap → Domain List → 3tap.cc → Advanced DNS, add the DNS records Vercel shows you.
-7. Make `3tap.cc` the primary domain and redirect `www.3tap.cc` to it.
+Prerequisite: **Docker must be installed and running.** Supabase's local development stack runs in containers.
 
-Pairing links are generated from `location.origin`, so production QR codes automatically use `https://3tap.cc/pair#...`. No domain string needs to be hard-coded in the app.
+Useful but rarely needed:
 
-## Sync model
+```bash
+npm run db:reset   # wipe/rebuild LOCAL data only
+npm run db:stop    # stop the local Supabase containers
+```
 
-- First visit creates a board and a random 256-bit secret.
-- Only SHA-256(secret) is stored in the database.
-- The raw secret is stored locally on each paired device.
-- API requests send it as a bearer token over HTTPS.
-- Pair links use the URL fragment (`#...`), so the raw secret is not sent in the initial HTTP request or server logs.
-- The UI is optimistic and caches the board locally.
-- Failed taps are queued in localStorage and replayed when connectivity returns.
-- Visible devices do a lightweight change check every 8 seconds and sync immediately on focus/reconnect.
+## Production workflow
 
-## Performance design
+Push `main` to GitHub. Vercel builds/deploys automatically.
 
-- taps update locally before any network request
-- reactive entry map gives O(1) cell lookup instead of scanning history
-- rapid edits are compacted and batched into one API request
-- cached-board serialization is deferred off the tap path
-- unchanged sync checks return HTTP 304 instead of downloading the board
-- QR generation is lazy-loaded only when Add device is opened
-- immutable PWA assets are served cache-first
-- hidden tabs stop doing sync work
-- the day rollover uses one midnight timer instead of constant date polling
+On a production build, `scripts/build.mjs`:
 
-If you already ran an older 3tap schema, run `supabase/performance.sql` once before starting this version.
+1. refuses to deploy if production DB credentials are missing;
+2. applies pending files from `supabase/migrations/` to the production database;
+3. builds the SvelteKit app only after the DB is ready.
 
-## V1 scope
+This prevents a deployment from silently shipping a navbar-only app because the database was missing or behind the code.
 
-Included:
+### One-time Vercel setup
 
-- automatic anonymous board
-- default habit list
-- `- | +` tap cycling
-- one date column per day from board creation through today
-- automatic new day detection
-- responsive sticky habit column
-- QR / link device pairing
-- recovery code
-- edit/add/remove/reorder habits
-- local cache + simple offline mutation queue
-- JSON export
-- installable PWA
+In **Vercel → 3tap → Settings → Environment Variables**, add these as **Production** variables:
 
-Deliberately excluded:
+```text
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+SUPABASE_DB_URL
+```
 
-- accounts
-- passwords
-- streaks
-- analytics
-- reminders
-- social features
-- categories
-- scores
-- notifications
+- `SUPABASE_URL`: Supabase project URL.
+- `SUPABASE_SERVICE_ROLE_KEY`: your `sb_secret_...` server key. Never expose this to browser code.
+- `SUPABASE_DB_URL`: Supabase Postgres connection string from **Connect**. If the direct connection is unavailable from the build environment, use the Session Pooler connection string.
 
-## Security note
+After saving them, redeploy once. From then on: **edit locally → git push → production works**.
 
-The recovery code / pairing link is effectively the password. Anyone who possesses it can access the board. This tradeoff is intentional to keep 3tap accountless and frictionless.
+## Database environments
+
+| Environment | Database | Configuration |
+| --- | --- | --- |
+| `npm run dev` | Local Supabase/Postgres in Docker | automatic |
+| Vercel Preview | no production migration | Vercel Preview env if you choose to use previews |
+| Vercel Production / 3tap.cc | Hosted Supabase production project | Vercel Production secrets |
+
+Schema changes live only in `supabase/migrations/`. Do not edit production tables manually. Add a migration, test it locally with `npm run dev`, then push it.
+
+## Architecture
+
+- SvelteKit 2 + Svelte 5
+- Supabase Postgres
+- local-first UI / optimistic taps
+- accountless board secret authentication
+- Vercel production hosting
+- local Supabase CLI stack for development

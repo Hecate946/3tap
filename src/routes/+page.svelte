@@ -22,6 +22,7 @@
   let board: Board | null = browser ? getCachedBoard() : null;
   let credentials: Credentials | null = browser ? getCredentials() : null;
   let loading = !board;
+  let startupError = '';
   let online = true;
   let menuOpen = false;
   let theme: 'light' | 'dark' = 'light';
@@ -1025,10 +1026,12 @@
     }
 
     try {
+      startupError = '';
       if (!credentials) await createBoard();
       else await sync();
-    } catch {
+    } catch (error) {
       online = navigator.onLine;
+      startupError = error instanceof Error ? error.message : 'Could not connect to the database';
     } finally {
       loading = false;
       await scrollToToday();
@@ -1310,7 +1313,14 @@
       </div>
     </main>
   {:else}
-    <main aria-busy={loading}></main>
+    <main aria-busy={loading}>
+      {#if startupError}
+        <div class="startup-error" role="alert">
+          <span>couldn’t load 3tap</span>
+          <button onclick={() => { startupError = ''; loading = true; void initialize(); }}>retry</button>
+        </div>
+      {/if}
+    </main>
   {/if}
 
 </div>
@@ -1552,28 +1562,42 @@
   }
   .drawer-theme {
     position: absolute;
-    top: 9px;
+    top: 7px;
     right: var(--page-inset);
-    width: 30px;
-    height: 30px;
+    width: 38px;
+    height: 38px;
     display: grid;
     place-items: center;
+    border-radius: 50%;
     color: var(--text);
-    font-size: 15px;
+    font-size: 21px;
     line-height: 1;
-    opacity: .58;
+    opacity: .68;
+    transition: transform 150ms ease, background 150ms ease, opacity 150ms ease;
     -webkit-tap-highlight-color: transparent;
   }
+  .drawer-theme:active { transform: scale(.9); }
   @media (hover: hover) and (pointer: fine) {
     .hamburger-button:hover { opacity: .92; }
     .drawer-item:hover { opacity: 1; }
-    .drawer-theme:hover { opacity: .95; }
+    .drawer-theme:hover { opacity: 1; background: var(--hover); transform: scale(1.12) rotate(9deg); }
     .habit-controls button:not(:disabled):hover { opacity: .9; }
     .cell:not(:disabled):hover { background: var(--hover); }
     .today-button:hover { opacity: .9; }
     .grid-scroll { cursor: grab; }
     .habit-name { cursor: grab; }
   }
+
+  .startup-error {
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 var(--page-inset);
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .startup-error button { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 
   main { width: 100%; }
   .center { min-height: 60dvh; display: grid; place-items: center; font-size: 12px; opacity: .55; }
