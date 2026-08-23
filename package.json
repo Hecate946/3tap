@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
-    "preview": "vite preview",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "dev:web": "vite dev",
     "build:web": "vite build",
@@ -18,13 +19,14 @@
     "qrcode": "1.5.4"
   },
   "devDependencies": {
-    "@sveltejs/adapter-vercel": "6.3.4",
+    "@sveltejs/adapter-cloudflare": "7.2.9",
     "@sveltejs/kit": "2.70.3",
     "@sveltejs/vite-plugin-svelte": "7.2.0",
     "@types/qrcode": "1.5.5",
     "svelte": "5.56.10",
     "svelte-check": "4.3.3",
     "typescript": "5.9.2",
-    "vite": "8.2.2"
+    "vite": "8.2.2",
+    "wrangler": "^4.68.0"
   }
 }
