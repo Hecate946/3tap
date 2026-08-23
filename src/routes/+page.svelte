@@ -1122,7 +1122,18 @@
           aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
           title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
           onclick={toggleTheme}
-        >{theme === 'dark' ? '☀' : '☾'}</button>
+        >
+          {#if theme === 'dark'}
+            <svg class="theme-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.75"></circle>
+              <path d="M8 1.25v1.5M8 13.25v1.5M1.25 8h1.5M13.25 8h1.5M3.23 3.23l1.06 1.06M11.71 11.71l1.06 1.06M12.77 3.23l-1.06 1.06M4.29 11.71l-1.06 1.06"></path>
+            </svg>
+          {:else}
+            <svg class="theme-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M12.85 10.45A5.75 5.75 0 0 1 5.55 3.15 5.75 5.75 0 1 0 12.85 10.45Z"></path>
+            </svg>
+          {/if}
+        </button>
         <div class="drawer-list">
           <button class="drawer-item" onclick={openPair}>add device</button>
           <button class="drawer-item" onclick={openArchived}>
@@ -1564,23 +1575,30 @@
     position: absolute;
     top: 7px;
     right: var(--page-inset);
-    width: 38px;
-    height: 38px;
+    width: 34px;
+    height: 34px;
     display: grid;
     place-items: center;
-    border-radius: 50%;
     color: var(--text);
-    font-size: 21px;
-    line-height: 1;
-    opacity: .68;
-    transition: transform 150ms ease, background 150ms ease, opacity 150ms ease;
+    opacity: .62;
+    transition: opacity 140ms linear;
     -webkit-tap-highlight-color: transparent;
   }
-  .drawer-theme:active { transform: scale(.9); }
+  .theme-icon {
+    width: 15px;
+    height: 15px;
+    display: block;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+  }
   @media (hover: hover) and (pointer: fine) {
-    .hamburger-button:hover { opacity: .92; }
+    .hamburger-button:hover,
+    .drawer-theme:hover { opacity: .92; }
     .drawer-item:hover { opacity: 1; }
-    .drawer-theme:hover { opacity: 1; background: var(--hover); transform: scale(1.12) rotate(9deg); }
     .habit-controls button:not(:disabled):hover { opacity: .9; }
     .cell:not(:disabled):hover { background: var(--hover); }
     .today-button:hover { opacity: .9; }
