@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { browser } from '$app/environment';
   import { flip } from 'svelte/animate';
+  import { slide } from 'svelte/transition';
   import { SvelteMap } from 'svelte/reactivity';
   import type { Board, Credentials, Entry, Habit, MarkValue } from '$lib/types';
   import {
@@ -17,9 +19,9 @@
 
   type DayColumn = { key: string; weekday: string; day: number; month: string; year: number };
 
-  let board: Board | null = null;
-  let credentials: Credentials | null = null;
-  let loading = true;
+  let board: Board | null = browser ? getCachedBoard() : null;
+  let credentials: Credentials | null = browser ? getCredentials() : null;
+  let loading = !board;
   let online = true;
   let menuOpen = false;
   let theme: 'light' | 'dark' = 'light';
@@ -42,14 +44,18 @@
   let scroller: HTMLDivElement;
   let currentDay = new Date();
   let windowEndOffset = 0;
-  let visibleMonthLabel = '';
+  let visibleMonthLabel = `${new Intl.DateTimeFormat(undefined, { month: 'short' }).format(currentDay).toUpperCase()} ${currentDay.getFullYear()}`;
   let showTodayButton = false;
   let shiftingWindow = false;
   let scrollRaf = 0;
   const WINDOW_DAYS = 84;
   const WINDOW_SHIFT = 28;
   let minimumVisibleDays = 32;
-  let historyIntroWidth = 0;
+  // Fixed 48px day cells + fixed 5-column label area let us calculate the
+  // default tutorial space before the first paint. DOM measurement refines it later.
+  let historyIntroWidth = browser && board
+    ? Math.max(0, window.innerWidth - 240 - realHistoryDays(board) * 48)
+    : 0;
   const pendingByCell = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setInterval> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -79,6 +85,20 @@
 
   const entries = new SvelteMap<string, Entry>();
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
+
+  // Bootstrap the visible grid synchronously from local storage. Network sync is
+  // strictly background work, so returning users never wait on Supabase to paint.
+  for (const entry of board?.entries ?? []) {
+    entries.set(cellKey(entry.habitId, entry.date), entry);
+  }
+  if (credentials) {
+    for (const change of compactQueue(getQueue())) {
+      pendingByCell.set(cellKey(change.habitId, change.date), change);
+      const key = cellKey(change.habitId, change.date);
+      if (change.value === 0) entries.delete(key);
+      else entries.set(key, { habitId: change.habitId, date: change.date, value: change.value as 1 | 2, updatedAt: '' });
+    }
+  }
 
   function dateKey(date: Date) {
     const y = date.getFullYear();
@@ -983,8 +1003,11 @@
 
   async function initialize() {
     online = navigator.onLine;
-    credentials = getCredentials();
-    board = getCachedBoard();
+
+    // Re-read only when the page did not already bootstrap from local storage.
+    if (!credentials) credentials = getCredentials();
+    if (!board) board = getCachedBoard();
+
     pendingByCell.clear();
     for (const change of compactQueue(getQueue())) {
       pendingByCell.set(cellKey(change.habitId, change.date), change);
@@ -992,6 +1015,14 @@
     if (!credentials) pendingByCell.clear();
     hydrateEntries(board);
     for (const change of pendingChanges()) applyLocalEntry(change);
+
+    // If we have local state, paint/position it now and sync in the background.
+    if (board && credentials) {
+      loading = false;
+      await scrollToToday();
+      void sync();
+      return;
+    }
 
     try {
       if (!credentials) await createBoard();
@@ -1063,55 +1094,51 @@
 </svelte:head>
 
 <div class="shell">
-  <header class="navbar" class:scrolled={navScrolled}>
-    <div class="brand">3tap</div>
-    <nav class="nav-actions" aria-label="App controls">
-      {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
-      <button
-        class="nav-icon theme-button"
-        aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
-        aria-pressed={theme === 'dark'}
-        title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
-        onclick={toggleTheme}
-      >
-        {#if theme === 'dark'}
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="3.5"></circle>
-            <path d="M12 2v2.25M12 19.75V22M4.93 4.93l1.59 1.59M17.48 17.48l1.59 1.59M2 12h2.25M19.75 12H22M4.93 19.07l1.59-1.59M17.48 6.52l1.59-1.59"></path>
-          </svg>
-        {:else}
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20.2 15.15A8.35 8.35 0 0 1 8.85 3.8 8.4 8.4 0 1 0 20.2 15.15Z"></path>
-          </svg>
-        {/if}
-      </button>
-      <div class="menu-wrap">
+  <header class="nav-shell" class:scrolled={navScrolled}>
+    <div class="navbar">
+      <div class="brand">3tap</div>
+      <nav class="nav-actions" aria-label="App controls">
+        {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
         <button
-          class="nav-icon menu-button"
-          aria-label="More options"
+          class="hamburger-button"
+          class:open={menuOpen}
+          aria-label={menuOpen ? 'Close menu' : 'Open menu'}
           aria-expanded={menuOpen}
           onclick={() => (menuOpen = !menuOpen)}
         >
-          <span aria-hidden="true">···</span>
+          <span></span>
+          <span></span>
+          <span></span>
         </button>
-        {#if menuOpen}
-          <div class="menu">
-            <button onclick={openPair}>add device</button>
-            <button onclick={openArchived}>archived{#if (board?.archivedHabits?.length ?? 0) > 0}<span class="menu-count">{board?.archivedHabits?.length}</span>{/if}</button>
-            <button onclick={openRecovery}>recovery</button>
-            <button onclick={exportData}>export</button>
-          </div>
-        {/if}
+      </nav>
+    </div>
+    {#if menuOpen}
+      <div class="nav-drawer" transition:slide={{ duration: 240 }}>
+        <button
+          class="drawer-theme"
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          onclick={toggleTheme}
+        >{theme === 'dark' ? '☀' : '☾'}</button>
+        <div class="drawer-list">
+          <button class="drawer-item" onclick={openPair}>add device</button>
+          <button class="drawer-item" onclick={openArchived}>
+            archived{#if (board?.archivedHabits?.length ?? 0) > 0}<span class="drawer-count">{board?.archivedHabits?.length ?? 0}</span>{/if}
+          </button>
+          <button class="drawer-item" onclick={openRecovery}>recovery</button>
+          <button class="drawer-item" onclick={exportData}>export</button>
+          <div class="drawer-status" aria-live="polite">{online ? 'synced' : 'offline'}</div>
+        </div>
       </div>
-    </nav>
+    {/if}
   </header>
 
   {#if board}
     <main>
-      <div class="timeline-toolbar">
+      <div class="timeline-toolbar" aria-label="Timeline context">
         <div class="timeline-toolbar-spacer"></div>
         <div class="timeline-toolbar-meta">
-          <span>{visibleMonthLabel}</span>
+          <span class="month-label">{visibleMonthLabel}</span>
           {#if showTodayButton}
             <button class="today-button" aria-label="Jump to today" onclick={scrollToToday}>today →</button>
           {/if}
@@ -1272,6 +1299,13 @@
               <span>past days stay locked</span>
             </div>
           </div>
+          {#if board.habits.length > 0}
+            <div
+              class="history-bottom-rule"
+              style={`left:var(--habit-width); width:${historyIntroWidth}px; top:${30 + board.habits.length * 48 - 1}px`}
+              aria-hidden="true"
+            ></div>
+          {/if}
         {/if}
       </div>
     </main>
@@ -1409,16 +1443,24 @@
     --day-size: 48px;
     --habit-width: calc(var(--day-size) * 5);
     --line: 1px;
-    --grid-weak: var(--grid-weak-theme);
-    --grid-strong: var(--grid-strong-theme);
+    --grid: var(--grid-weak-theme);
+    --grid-weak: var(--grid);
+    --grid-strong: var(--grid);
     --page-inset: 16px;
     min-height: 100dvh;
     padding: 0;
   }
-  .navbar {
+  .nav-shell {
     position: sticky;
     top: 0;
     z-index: 40;
+    width: 100%;
+    background: var(--bg);
+    box-shadow: 0 0 0 transparent;
+    transition: box-shadow 90ms linear;
+  }
+  .nav-shell.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
+  .navbar {
     height: calc(var(--day-size) + env(safe-area-inset-top));
     min-height: calc(var(--day-size) + env(safe-area-inset-top));
     display: flex;
@@ -1426,14 +1468,10 @@
     justify-content: space-between;
     gap: 12px;
     width: 100%;
-    margin: 0;
     padding: env(safe-area-inset-top) var(--page-inset) 0;
     background: var(--bg);
-    border-bottom: var(--line) solid var(--grid-strong);
-    box-shadow: 0 0 0 transparent;
-    transition: box-shadow 90ms linear;
+    border-bottom: var(--line) solid var(--grid);
   }
-  .navbar.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
   .brand {
     flex: none;
     font-size: 12px;
@@ -1446,59 +1484,90 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 2px;
+    gap: 8px;
   }
-  .offline { margin-right: 6px; font-size: 10px; opacity: .45; white-space: nowrap; }
+  .offline { font-size: 10px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
-  .nav-icon {
+  .hamburger-button {
+    position: relative;
     width: 34px;
     height: 34px;
     display: grid;
     place-items: center;
-    border-radius: 5px;
     color: var(--text);
-    opacity: .6;
+    opacity: .62;
     -webkit-tap-highlight-color: transparent;
   }
-  .nav-icon svg {
-    width: 15px;
-    height: 15px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.55;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .menu-wrap { position: relative; flex: none; }
-  .menu-button { font-size: 17px; line-height: 1; letter-spacing: .08em; }
-  .menu-button span { transform: translateY(-2px); }
-  .menu {
+  .hamburger-button span {
     position: absolute;
-    z-index: 30;
-    top: 40px;
-    right: 0;
-    min-width: 136px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    padding: 4px;
-    box-shadow: 0 8px 24px var(--shadow);
+    width: 15px;
+    height: 1px;
+    background: currentColor;
+    transition: transform 220ms ease, opacity 140ms linear, top 220ms ease;
   }
-  .menu button {
+  .hamburger-button span:nth-child(1) { top: 11px; }
+  .hamburger-button span:nth-child(2) { top: 16px; }
+  .hamburger-button span:nth-child(3) { top: 21px; }
+  .hamburger-button.open span:nth-child(1) { top: 16px; transform: rotate(45deg); }
+  .hamburger-button.open span:nth-child(2) { opacity: 0; }
+  .hamburger-button.open span:nth-child(3) { top: 16px; transform: rotate(-45deg); }
+  .nav-drawer {
+    position: relative;
+    width: 100%;
+    background: var(--bg);
+    border-bottom: var(--line) solid var(--grid);
+    overflow: hidden;
+    padding: 10px var(--page-inset) 12px;
+  }
+  .drawer-list {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: min(240px, calc(100% - 44px));
+  }
+  .drawer-item {
+    min-width: 0;
+    min-height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    color: var(--text);
+    text-align: left;
+    font-size: 11px;
+    opacity: .72;
+  }
+  .drawer-count {
+    color: var(--muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .drawer-status {
+    min-height: 28px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    width: 100%;
-    min-height: 34px;
-    padding: 0 9px;
-    text-align: left;
-    color: var(--text);
-    font-size: 11px;
+    color: var(--muted);
+    font-size: 10px;
+    cursor: default;
   }
-  .menu-count { opacity: .48; font-variant-numeric: tabular-nums; }
+  .drawer-theme {
+    position: absolute;
+    top: 9px;
+    right: var(--page-inset);
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1;
+    opacity: .58;
+    -webkit-tap-highlight-color: transparent;
+  }
   @media (hover: hover) and (pointer: fine) {
-    .nav-icon:hover { background: var(--hover); opacity: .9; }
-    .menu button:hover { background: var(--hover); }
+    .hamburger-button:hover { opacity: .92; }
+    .drawer-item:hover { opacity: 1; }
+    .drawer-theme:hover { opacity: .95; }
     .habit-controls button:not(:disabled):hover { opacity: .9; }
     .cell:not(:disabled):hover { background: var(--hover); }
     .today-button:hover { opacity: .9; }
@@ -1512,8 +1581,8 @@
     display: grid;
     grid-template-columns: var(--habit-width) minmax(0, 1fr);
     align-items: center;
-    height: 14px;
-    min-height: 14px;
+    height: 18px;
+    min-height: 18px;
     width: 100%;
   }
   .timeline-toolbar-spacer { min-width: 0; }
@@ -1521,18 +1590,18 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 0 4px 0 10px;
+    justify-content: flex-end;
+    gap: 18px;
+    padding: 0 var(--page-inset) 0 8px;
     color: var(--muted);
     font-size: 10px;
-    letter-spacing: .06em;
+    letter-spacing: .04em;
   }
-  .timeline-toolbar-meta > span { white-space: nowrap; }
+  .month-label { white-space: nowrap; opacity: .78; }
   .today-button {
-    height: 14px;
-    min-height: 14px;
-    padding: 0 2px;
+    height: 18px;
+    min-height: 18px;
+    padding: 0;
     color: var(--text);
     font-size: 10px;
     opacity: .52;
@@ -1563,17 +1632,16 @@
   tbody tr:not(.add-row) > th,
   tbody tr:not(.add-row) > td {
     height: var(--day-size);
-    border-bottom: var(--line) solid var(--grid-weak);
+    border-bottom: var(--line) solid var(--grid);
   }
   thead th {
-    height: 34px;
+    height: 30px;
     vertical-align: bottom;
     font-weight: 400;
     font-size: 10px;
-    opacity: .5;
     text-align: center;
     background: transparent;
-    border-bottom: var(--line) solid var(--grid-strong);
+    border-bottom: var(--line) solid var(--grid);
   }
   thead th.day-head,
   td:not(.history-intro-row):not(.history-intro-add-spacer) {
@@ -1602,12 +1670,19 @@
   .history-intro-overlay {
     position: absolute;
     z-index: 4;
-    top: 34px;
+    top: 30px;
     display: grid;
     place-items: center;
     min-height: calc(var(--day-size) * 3);
     padding: 18px;
     background: var(--bg);
+    pointer-events: none;
+  }
+  .history-bottom-rule {
+    position: absolute;
+    z-index: 8;
+    height: var(--line);
+    background: var(--grid);
     pointer-events: none;
   }
   .history-tutorial {
@@ -1627,12 +1702,10 @@
     font-weight: 500;
   }
   .history-tutorial span { opacity: .7; }
-  /* Vertical rules are overlays, not borders, so they always paint above
-     horizontal rules at intersections. Every boundary is still exactly 1px. */
-  thead th.day-head,
-  tbody td:not(.history-intro-row):not(.history-intro-add-spacer) { position: relative; }
-  thead th.day-head::before,
-  tbody td:not(.history-intro-row):not(.history-intro-add-spacer)::before {
+  /* Vertical rules begin at the first habit row—never in the date/header band.
+     Every visible grid boundary uses exactly the same 1px/color token. */
+  tbody tr:not(.add-row) td:not(.history-intro-row):not(.history-intro-add-spacer) { position: relative; }
+  tbody tr:not(.add-row) td:not(.history-intro-row):not(.history-intro-add-spacer)::before {
     content: '';
     position: absolute;
     z-index: 3;
@@ -1640,17 +1713,22 @@
     bottom: -1px;
     left: 0;
     width: var(--line);
-    background: var(--grid-weak);
+    background: var(--grid);
     pointer-events: none;
   }
 
-  /* The sticky habit/timeline divider owns the first vertical boundary. */
-  thead .habit-head + .day-head::before,
-  tbody .habit-name + td::before { display: none; }
+  /* The sticky habit/timeline divider owns the first body vertical boundary. */
+  tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   thead th span,
-  thead th strong { display: block; font-weight: 400; line-height: 1.2; }
+  thead th strong {
+    display: block;
+    font-weight: 400;
+    line-height: 1.2;
+    opacity: .5;
+  }
   thead th strong { font-size: 11px; }
-  thead th.today { opacity: .8; }
+  thead th.today span,
+  thead th.today strong { opacity: .8; }
 
   .habit-head,
   .habit-name {
@@ -1662,8 +1740,7 @@
     max-width: var(--habit-width);
     background: var(--bg);
   }
-  .habit-head::after,
-  .habit-name::after {
+  tbody tr:not(.add-row) .habit-name::after {
     content: '';
     position: absolute;
     z-index: 9;
@@ -1671,7 +1748,7 @@
     bottom: -1px;
     right: 0;
     width: var(--line);
-    background: var(--grid-strong);
+    background: var(--grid);
     pointer-events: none;
   }
   .habit-head { z-index: 8; }
@@ -1749,7 +1826,7 @@
     min-width: 0;
     height: 30px;
     border: 0;
-    border-bottom: var(--line) solid var(--grid-strong);
+    border-bottom: var(--line) solid var(--border);
     border-radius: 0;
     outline: none;
     background: transparent;
@@ -1777,9 +1854,9 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: var(--today-fill); }
-  /* The only strong date divider inside the timeline: tracking start. */
+  /* Tracking start keeps the same 1px grid color as every other boundary. */
   thead th.day-head.enrolled::before,
-  tbody td.enrolled::before { background: var(--grid-strong); }
+  tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   td.prestart { background: var(--prestart-fill); }
   td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
