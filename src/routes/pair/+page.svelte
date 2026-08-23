@@ -7,8 +7,7 @@
     clearLocalBoard,
     getCredentials,
     setCachedBoard,
-    setCredentials,
-    setQueue
+    setCredentials
   } from '$lib/client';
 
   let message = 'pairing…';
@@ -19,12 +18,13 @@
 
   function parsePairToken(raw: string): Credentials | null {
     const token = raw.trim();
-    const separator = token.indexOf('.');
-    if (separator < 1) return null;
-    const boardId = token.slice(0, separator).trim();
-    const secret = token.slice(separator + 1).trim();
-    if (!boardId || secret.length < 20) return null;
-    return { boardId, secret };
+    const [boardId = '', secret = '', recoveryCode = ''] = token.split('.');
+    if (!boardId.trim() || secret.trim().length < 20) return null;
+    return {
+      boardId: boardId.trim(),
+      secret: secret.trim(),
+      ...(recoveryCode.trim() ? { recoveryCode: recoveryCode.trim() } : {})
+    };
   }
 
   async function commitPair() {
@@ -32,10 +32,7 @@
 
     const existing = getCredentials();
     if (!existing || existing.boardId !== targetCredentials.boardId) {
-      // Only discard board-specific cache/queue when this is genuinely a different
-      // board. Re-opening a link for the same board must not erase pending taps.
       clearLocalBoard();
-      setQueue([]);
     }
     setCredentials(targetCredentials);
     setCachedBoard(targetBoard);
@@ -44,9 +41,6 @@
 
   onMount(async () => {
     const rawToken = location.hash.slice(1);
-
-    // The secret lives in the URL fragment so it is not sent with the page request.
-    // Remove it from the visible URL/history before doing any network work.
     history.replaceState(null, '', '/pair');
 
     const parsed = parsePairToken(rawToken);
@@ -57,7 +51,6 @@
     }
 
     try {
-      // Validate the temporary credentials before changing anything stored on this device.
       const response = await fetch(`/api/boards/${encodeURIComponent(parsed.boardId)}`, {
         headers: authHeaders(parsed)
       });
@@ -113,7 +106,7 @@
   :global(html) { color-scheme: light dark; }
   :global(html, body) { margin: 0; min-height: 100%; }
   :global(body) {
-    background: light-dark(#f7f7f5, #111210);
+    background: light-dark(#f7f7f5, #0e1112);
     color: light-dark(#11110f, #ecece6);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   }

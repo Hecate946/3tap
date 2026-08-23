@@ -17,11 +17,7 @@
     type PendingEntry
   } from '$lib/client';
 
-  type DayColumn = { key: string; weekday: string; day: number; month: string; year: number };
-
-  // One-time 2026-08-23 clean-slate reset. This mirrors the production DB
-  // reset migration so stale anonymous-board credentials/habits cannot survive
-  // in a returning browser after their server-side board has been removed.
+  type DayColumn = { key: string; weekday: string; day: number; year: number };
   const CLIENT_RESET_VERSION = '2026-08-23-clean-slate-v1';
   if (browser && localStorage.getItem('3tap.client-reset') !== CLIENT_RESET_VERSION) {
     clearLocalBoard();
@@ -61,7 +57,6 @@
   let scroller: HTMLDivElement;
   let currentDay = new Date();
   let windowEndOffset = 0;
-  let visibleMonthLabel = `${new Intl.DateTimeFormat(undefined, { month: 'short' }).format(currentDay).toUpperCase()} ${currentDay.getFullYear()}`;
   let displayMonthIndex = currentDay.getMonth();
   let displayYear = currentDay.getFullYear();
   let monthMenuOpen = false;
@@ -69,19 +64,14 @@
   let yearDraft = String(currentDay.getFullYear());
   let yearInput: HTMLInputElement;
   const monthOptions = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
   let showTodayButton = false;
   let shiftingWindow = false;
   let scrollRaf = 0;
   const WINDOW_DAYS = 84;
   const WINDOW_SHIFT = 7;
   let minimumVisibleDays = 32;
-  // Pre-start calendar columns are visual scaffolding only. They are never
-  // stored or editable, and the timeline may extend backward through them forever.
-  let historyIntroWidth = 0;
   const pendingByCell = new Map<string, PendingEntry>();
-  // Tap-local values deliberately stay outside Svelte reactivity. The tapped
-  // cell is painted synchronously, while the habit-name column is left completely
-  // untouched until a real background sync arrives.
   const localTapValues = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setInterval> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -111,9 +101,6 @@
 
   const entries = new SvelteMap<string, Entry>();
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
-
-  // Bootstrap the visible grid synchronously from local storage. Network sync is
-  // strictly background work, so returning users never wait on Supabase to paint.
   for (const entry of board?.entries ?? []) {
     entries.set(cellKey(entry.habitId, entry.date), entry);
   }
@@ -123,7 +110,7 @@
       pendingByCell.set(key, change);
       localTapValues.set(key, change);
       if (change.value === 0) entries.delete(key);
-      else entries.set(key, { habitId: change.habitId, date: change.date, value: change.value as 1 | 2, updatedAt: '' });
+      else entries.set(key, { habitId: change.habitId, date: change.date, value: change.value as 1 | 2 });
     }
   }
 
@@ -165,21 +152,14 @@
     if (!enrollmentDate(source)) return [];
 
     const end = shiftedDate(endDay, endOffset);
-    // Keep a generously overlapping moving window. There is intentionally no
-    // enrollment-date clamp: dates before signup are calendar scaffolding, so
-    // the user can keep scrolling backward indefinitely.
     const windowDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
     const start = shiftedDate(end, -(windowDays - 1));
     const days: DayColumn[] = [];
-    const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'narrow' });
-    const month = new Intl.DateTimeFormat(undefined, { month: 'short' });
-
     for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
       days.push({
         key: dateKey(cursor),
-        weekday: weekday.format(cursor),
+        weekday: weekdayFormat.format(cursor),
         day: cursor.getDate(),
-        month: month.format(cursor).toUpperCase(),
         year: cursor.getFullYear()
       });
     }
@@ -228,8 +208,7 @@
       entries.set(key, {
         habitId: change.habitId,
         date: change.date,
-        value: change.value as 1 | 2,
-        updatedAt: ''
+        value: change.value as 1 | 2
       });
     }
   }
@@ -251,8 +230,7 @@
           logicalEntries.set(key, {
             habitId: change.habitId,
             date: change.date,
-            value: change.value as 1 | 2,
-            updatedAt: ''
+            value: change.value as 1 | 2
           });
         }
       }
@@ -286,10 +264,6 @@
     const current = valueFor(habitId, date);
     const next = ((current + 1) % 3) as MarkValue;
     const change = { habitId, date, value: next };
-
-    // Update the actual DOM node first. This is the shortest possible visual path:
-    // pointer event -> text mutation. Svelte state, persistence and network syncing
-    // all happen afterward and never gate what the user sees.
     if (button) {
       button.textContent = symbols[next];
       button.classList.toggle('plus', next === 2);
@@ -320,8 +294,6 @@
     if (response.status === 304) return;
     if (!response.ok) {
       if (response.status === 404) {
-        // A board deleted from another paired device should not leave this
-        // device stranded on a stale local copy. Start a fresh blank board.
         clearLocalBoard();
         credentials = null;
         board = null;
@@ -359,7 +331,6 @@
     if (!credentials || !navigator.onLine || pendingByCell.size === 0) return;
 
     flushPromise = (async () => {
-      // Keep object identity so an older request can never delete a newer tap.
       const sent = new Map(pendingByCell);
       try {
         const response = await fetch(`/api/boards/${credentials!.boardId}/entries`, {
@@ -379,7 +350,6 @@
         online = navigator.onLine;
       } finally {
         flushPromise = null;
-        // If taps landed during the request, send the newest state next.
         if (pendingByCell.size && navigator.onLine) {
           if (flushTimer) clearTimeout(flushTimer);
           flushTimer = setTimeout(() => {
@@ -432,38 +402,22 @@
     const metrics = timelineMetrics();
     if (!metrics || metrics.dayWidth <= 0) return false;
     const timelineWidth = Math.max(0, scroller.clientWidth - metrics.habitWidth);
-    // One extra column absorbs fractional pixels/borders so the grid can never
-    // end before the right edge of the viewport.
     const next = Math.max(1, Math.ceil(timelineWidth / metrics.dayWidth) + 1);
     if (next === minimumVisibleDays) return false;
     minimumVisibleDays = next;
     return true;
   }
 
-  function updateHistoryIntroWidth() {
-    // Kept as a no-op so the existing scroll code stays simple. Empty timeline
-    // space is now filled with muted pre-start date columns instead of a spacer.
-    if (historyIntroWidth !== 0) {
-      historyIntroWidth = 0;
-      return true;
-    }
-    return false;
-  }
-
   function setVisibleMonthState(year: number, month: number) {
     const safeMonth = Math.max(1, Math.min(12, month));
     displayYear = year;
     displayMonthIndex = safeMonth - 1;
-    visibleMonthLabel = `${monthOptions[safeMonth - 1]} ${year}`;
   }
 
   function updateTimelineStatus() {
     if (!scroller || !dates.length) return;
     const metrics = timelineMetrics();
     if (!metrics) return;
-
-    // The month label describes the first visible calendar column, which makes
-    // its placement directly beside the habit/timeline divider feel literal.
     const index = Math.max(0, Math.min(dates.length - 1, Math.floor(scroller.scrollLeft / metrics.dayWidth)));
     const date = dates[index];
     setVisibleMonthState(date.year, Number(date.key.slice(5, 7)));
@@ -474,11 +428,6 @@
 
   async function shiftTimelineWindow(delta: number, metrics: { dayWidth: number; habitWidth: number }) {
     if (!scroller || delta === 0) return;
-
-    // Recycle a fixed number of calendar columns and compensate by the exact
-    // same pixel width. If a desktop pointer-drag is active, move its baseline
-    // by the same amount; otherwise the next pointermove would undo the
-    // compensation and trigger rapid repeated recycling (the apparent speed-up).
     windowEndOffset += delta;
     await tick();
     const beforeCompensation = scroller.scrollLeft;
@@ -525,7 +474,7 @@
   function startTimelinePan(event: PointerEvent) {
     if (!scroller || event.button !== 0 || event.pointerType !== 'mouse' || dragActive) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest('.habit-name, .timeline-side, input, textarea, button:not(:disabled)')) return;
+    if (target?.closest('.habit-name, .timeline-side, .add-row, input, textarea, button:not(:disabled)')) return;
 
     event.preventDefault();
     timelinePanPointerId = event.pointerId;
@@ -584,9 +533,6 @@
       void scrollToToday();
       return;
     }
-
-    // Update the control immediately. The timeline jump below will reconcile
-    // the visible month from the actual scroller position once it finishes.
     const value = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
     setVisibleMonthState(year, month);
     yearDraft = String(year);
@@ -621,9 +567,6 @@
       yearDraft = String(originalYear);
       return;
     }
-
-    // Merely leaving the year field must not move the timeline. This is
-    // especially important when the next click is the month control.
     if (year === originalYear) {
       yearDraft = String(year);
       return;
@@ -664,9 +607,6 @@
     const timelineWidth = Math.max(metrics.dayWidth, scroller.clientWidth - metrics.habitWidth);
     const visibleDays = Math.max(1, Math.floor(timelineWidth / metrics.dayWidth));
     const targetOffset = calendarDayDistance(today, target);
-
-    // End the moving window just far enough after the selected month start to
-    // place that date at the left edge of the visible timeline.
     windowEndOffset = Math.min(0, targetOffset + visibleDays - 1);
     await tick();
 
@@ -676,8 +616,6 @@
     else scroller.scrollLeft = 0;
 
     updateTimelineStatus();
-    // Keep the picker synchronized with the month the user explicitly chose.
-    // Manual scrolling will take over again on the next scroll event.
     setVisibleMonthState(year, month);
     yearDraft = String(year);
   }
@@ -686,32 +624,50 @@
     windowEndOffset = 0;
     await tick();
     if (updateMinimumVisibleDays()) await tick();
-    if (updateHistoryIntroWidth()) await tick();
     if (scroller) {
       scroller.scrollLeft = scroller.scrollWidth;
-        updateTimelineStatus();
+      updateTimelineStatus();
     }
+  }
+
+  async function ensureRecoveryCode() {
+    if (!credentials || credentials.recoveryCode || !navigator.onLine) return;
+
+    const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}/recovery`, {
+      method: 'POST',
+      headers: authHeaders(credentials)
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const data = (await response.json()) as { recoveryCode: string };
+    credentials = { ...credentials, recoveryCode: data.recoveryCode };
+    setCredentials(credentials);
   }
 
   async function openAccess() {
     if (!credentials) return;
     pairingCopied = false;
-    recoveryInput = `${credentials.boardId}.${credentials.secret}`;
+    recoveryInput = credentials.recoveryCode ?? '';
     restoreCodeInput = '';
     recoveryError = '';
     recoveryCopied = false;
     recovering = false;
     deleteBoardError = '';
     panel = 'access';
-
-    // Give the new device the freshest server state we can before pairing.
-    // The pairing link itself remains usable even if a background sync fails.
     if (navigator.onLine) {
       await flushHabitChanges();
       await flushQueue();
+      try {
+        await ensureRecoveryCode();
+        recoveryInput = credentials?.recoveryCode ?? '';
+      } catch {
+        recoveryInput = '';
+      }
     }
 
-    const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
+    if (!credentials) return;
+    const recoveryPart = credentials.recoveryCode ? `.${credentials.recoveryCode}` : '';
+    const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}${recoveryPart}`;
     if (pairingLink !== nextLink) {
       pairingLink = nextLink;
       qrDataUrl = '';
@@ -856,10 +812,6 @@
     const previewTop = clientY - dragCandidate.offsetY;
     const previewBottom = previewTop + dragPreviewHeight;
     let targetIndex = currentIndex;
-
-    // Edge-crossing reorder: there is deliberately no 50%/center threshold.
-    // Moving up: the instant the floating row's top edge overlaps the row above,
-    // that slot opens. Moving down: same rule using the bottom edge.
     if (movingUp) {
       for (let index = currentIndex - 1; index >= 0; index -= 1) {
         const habit = board.habits[index];
@@ -885,8 +837,6 @@
     const next = [...board.habits];
     const [dragged] = next.splice(currentIndex, 1);
     next.splice(targetIndex, 0, dragged);
-
-    // Reorder locally only. The server is updated once, on release.
     board = { ...board, habits: normalizeHabits(next) };
   }
 
@@ -948,9 +898,6 @@
 
   function onHabitDragEnd(event: PointerEvent) {
     if (dragPointerId !== null && event.pointerId !== dragPointerId) return;
-
-    // Apply the latest pointer position before committing, even if the browser
-    // has not painted the queued animation frame yet.
     if (dragActive && dragCandidate && dragPendingY !== null) {
       if (dragMoveRaf) cancelAnimationFrame(dragMoveRaf);
       dragMoveRaf = 0;
@@ -1064,7 +1011,6 @@
       const parsed = JSON.parse(detail) as { message?: unknown };
       if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message.trim();
     } catch {
-      // Plain-text API errors are valid too.
     }
     return detail;
   }
@@ -1080,9 +1026,6 @@
         method: 'DELETE',
         headers: authHeaders(credentials)
       });
-
-      // A 404 means the server already removed it, so local state can safely
-      // converge to the same result instead of trapping the confirmation UI.
       if (!response.ok && response.status !== 404) {
         throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
       }
@@ -1097,10 +1040,6 @@
       deleteHabitTarget = null;
       persistLocalStateNow();
       panel = 'archived';
-
-      // Reconcile quietly with the canonical board after the modal has already
-      // returned to Archive. This keeps the UI responsive and avoids depending
-      // on a particular DELETE response body shape.
       void fetchBoard(true).catch(() => {});
     } catch (error) {
       archiveError = error instanceof Error ? error.message : 'could not delete · retry';
@@ -1172,69 +1111,66 @@
     newHabitName = '';
   }
 
-  function parseRecoveryCode(raw: string): Credentials | null {
-    const token = raw.trim().replace(/^.*#/, '');
-    const separator = token.indexOf('.');
-    if (separator < 1) return null;
-    const boardId = token.slice(0, separator).trim();
-    const secret = token.slice(separator + 1).trim();
-    if (!boardId || secret.length < 20) return null;
-    return { boardId, secret };
+  function normalizeRecoveryEntry(raw: string) {
+    return raw
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
   }
 
   async function useRecoveryCode() {
     if (recovering) return;
     recoveryError = '';
-    const next = parseRecoveryCode(restoreCodeInput);
-    if (!next) {
-      recoveryError = 'Enter a complete recovery code.';
+    const code = normalizeRecoveryEntry(restoreCodeInput);
+    if (!code) {
+      recoveryError = 'Enter your recovery code.';
       return;
     }
     if (!navigator.onLine) {
-      recoveryError = 'Connect to the internet to verify this code.';
+      recoveryError = 'Connect to the internet to recover this board.';
       return;
     }
 
     recovering = true;
     try {
-      // Validate first. Never replace this device's current credentials with an
-      // unverified code.
-      const response = await fetch(`/api/boards/${encodeURIComponent(next.boardId)}`, {
-        headers: authHeaders(next)
+      const response = await fetch('/api/recover', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code })
       });
-      if (response.status === 401 || response.status === 404) {
-        recoveryError = 'That recovery code is not valid.';
+      if (response.status === 404) {
+        recoveryError = 'That recovery code was not found.';
         return;
       }
       if (!response.ok) throw new Error(await response.text());
 
-      const recoveredBoard: Board = await response.json();
-
-      // Commit the board switch only after successful verification so a typo can
-      // never strand the device on invalid credentials or stale cached data.
-      credentials = next;
-      board = recoveredBoard;
-      setCredentials(next);
-      setCachedBoard(recoveredBoard);
+      const recovered = (await response.json()) as { credentials: Credentials; board: Board };
+      credentials = recovered.credentials;
+      board = recovered.board;
+      setCredentials(recovered.credentials);
+      setCachedBoard(recovered.board);
       setQueue([]);
       pendingByCell.clear();
       localTapValues.clear();
       pendingHabitSave = null;
       entries.clear();
-      hydrateEntries(recoveredBoard);
+      hydrateEntries(recovered.board);
       qrDataUrl = '';
       pairingLink = '';
       panel = 'none';
       await tick();
       await scrollToToday();
     } catch {
-      recoveryError = 'Could not verify that code. Try again.';
+      recoveryError = 'Could not recover this board. Try again.';
     } finally {
       recovering = false;
     }
   }
 
   async function copyRecoveryCode() {
+    if (!recoveryInput) return;
     await copyText(recoveryInput);
     recoveryCopied = true;
     setTimeout(() => (recoveryCopied = false), 1400);
@@ -1268,9 +1204,6 @@
         } catch {}
         throw new Error(message || 'Could not delete this board.');
       }
-
-      // Remove every local reference before reloading. The normal bootstrap
-      // will create a new empty anonymous board on this device.
       clearLocalBoard();
       pendingByCell.clear();
       localTapValues.clear();
@@ -1284,8 +1217,6 @@
       deletingBoard = false;
     }
   }
-
-
 
   function scheduleNextDay() {
     if (dayTimer) clearTimeout(dayTimer);
@@ -1315,8 +1246,6 @@
 
   async function initialize() {
     online = navigator.onLine;
-
-    // Re-read only when the page did not already bootstrap from local storage.
     if (!credentials) credentials = getCredentials();
     if (!board) board = getCachedBoard();
 
@@ -1333,8 +1262,6 @@
     }
     hydrateEntries(board);
     for (const change of pendingChanges()) applyLocalEntry(change);
-
-    // If we have local state, paint/position it now and sync in the background.
     if (board && credentials) {
       loading = false;
       await scrollToToday();
@@ -1368,7 +1295,6 @@
     };
     const onResize = () => {
       updateMinimumVisibleDays();
-      updateHistoryIntroWidth();
       updateTimelineStatus();
     };
     const onPageHide = () => {
@@ -1421,7 +1347,7 @@
   <header class="nav-shell" class:scrolled={navScrolled}>
     <div class="navbar">
       <div class="brand-slot"><div class="brand">3tap</div></div>
-      <div class="month-slot" aria-label={`Timeline month and year. Currently ${visibleMonthLabel}`}>
+      <div class="month-slot" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
         <div class="month-control">
           <button
             class="month-button"
@@ -1491,7 +1417,6 @@
             <div class="timeline-side">
               <nav class="timeline-controls" aria-label="App controls">
                 <button class="tool-icon device-tool" aria-label="Access and devices" title="Access" onclick={openAccess}>
-                  <!-- Lucide-inspired filled Smartphone -->
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <rect x="5" y="2" width="14" height="20" rx="2.25" class="icon-fill" stroke="none"></rect>
                     <rect x="7" y="4" width="10" height="14" rx=".75" class="icon-cutout" stroke="none"></rect>
@@ -1499,7 +1424,6 @@
                   </svg>
                 </button>
                 <button class="tool-icon archive-tool" aria-label="Archive" title="Archive" onclick={openArchived}>
-                  <!-- Lucide-inspired filled Archive -->
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <rect x="3" y="7" width="18" height="14" rx="2" class="icon-fill" stroke="none"></rect>
                     <rect x="2" y="3" width="20" height="5" rx="1.5" class="icon-fill" stroke="none"></rect>
@@ -1513,7 +1437,6 @@
                   onclick={toggleTheme}
                 >
                   {#if theme === 'dark'}
-                    <!-- Lucide: Sun -->
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
                       <path d="M12 2v2"></path>
@@ -1526,7 +1449,6 @@
                       <path d="m19.07 4.93-1.41 1.41"></path>
                     </svg>
                   {:else}
-                    <!-- Lucide-inspired filled Moon -->
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path>
                     </svg>
@@ -1534,13 +1456,6 @@
                 </button>
               </nav>
             </div>
-            {#if historyIntroWidth > 0}
-              <div
-                class="history-head-spacer"
-                style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
-                aria-hidden="true"
-              ></div>
-            {/if}
             <div class="day-head-strip">
               {#each dates as date (date.key)}
                 <div
@@ -1626,15 +1541,6 @@
                     </div>
                   </div>
                 </th>
-                {#if historyIntroWidth > 0}
-                  <td
-                    class="history-intro-row"
-                    style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
-                    aria-hidden="true"
-                  >
-
-                  </td>
-                {/if}
                 {#each dates as date (date.key)}
                   {@const value = valueFor(habit.id, date.key)}
                   {@const prestart = isPreEnrollment(date.key) || isBeforeHabitStart(habit, date.key)}
@@ -1681,13 +1587,6 @@
                   <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
                 {/if}
               </th>
-              {#if historyIntroWidth > 0}
-                <td
-                  class="history-intro-add-spacer"
-                  style={`width:${historyIntroWidth}px; min-width:${historyIntroWidth}px; max-width:${historyIntroWidth}px`}
-                  aria-hidden="true"
-                ></td>
-              {/if}
               <td class="add-spacer" colspan={dates.length}>
                 <div class="state-legend" aria-label="Habit mark legend">
                   <span><b>·</b> before</span>
@@ -1704,14 +1603,11 @@
       </div>
       {#if board.habits.length === 0}
         <section class="zero-tutorial" aria-label="Getting started">
-          <strong>add a habit to start tracking</strong>
-          <span>tap today to cycle between</span>
-          <div class="zero-state-key" aria-label="Habit states">
-            <span><b>-</b> missed</span>
-            <span><b>|</b> done</span>
-            <span><b>+</b> great</span>
-          </div>
-          <span>past days stay locked</span>
+          <ul class="zero-tutorial-list">
+            <li><strong>add a habit to start tracking</strong></li>
+            <li>tap today to cycle between <b>-</b> missed · <b>|</b> done · <b>+</b> great</li>
+            <li>past days stay locked</li>
+          </ul>
         </section>
       {/if}
     </main>
@@ -1755,19 +1651,19 @@
         <div class="panel-divider"></div>
 
         <div class="access-section">
-          <div class="panel-label">your backup key</div>
-          <p class="section-help">Keep this somewhere safe. If you lose every device, this little key brings your board back.</p>
-          <div class="code-box">
-            <code>{recoveryInput}</code>
+          <div class="panel-label">recovery code</div>
+          <p class="section-help">Save this somewhere safe. Use it if you lose access to all of your devices.</p>
+          <div class="code-box recovery-code-box">
+            <code>{recoveryInput || 'connect to load recovery code'}</code>
           </div>
-          <button class="panel-button" onclick={copyRecoveryCode}>{recoveryCopied ? 'copied ✓' : 'copy key'}</button>
+          <button class="panel-button" disabled={!recoveryInput} onclick={copyRecoveryCode}>{recoveryCopied ? 'copied ✓' : 'copy recovery code'}</button>
         </div>
 
         <div class="panel-divider"></div>
 
         <div class="access-section">
-          <label class="panel-label" for="restore-code">have another key?</label>
-          <p class="section-help">Paste a backup key from another board. Only this device will switch.</p>
+          <label class="panel-label" for="restore-code">recover a board</label>
+          <p class="section-help">Paste its recovery code here. Recovery creates a fresh device key, so previously paired devices will need to be added again.</p>
           <textarea
             id="restore-code"
             class="restore-code-input"
@@ -1775,12 +1671,13 @@
             rows="2"
             spellcheck="false"
             autocomplete="off"
-            placeholder="paste backup key"
+            autocapitalize="none"
+            placeholder="winter_donkey_maple_cloud_…"
             oninput={() => (recoveryError = '')}
           ></textarea>
           {#if recoveryError}<p class="recovery-error" role="alert">{recoveryError}</p>{/if}
           <button class="panel-button panel-button-primary" disabled={recovering || !restoreCodeInput.trim()} onclick={useRecoveryCode}>
-            {recovering ? 'checking…' : 'open board'}
+            {recovering ? 'recovering…' : 'recover board'}
           </button>
         </div>
 
@@ -1873,8 +1770,6 @@
   </div>
 {/if}
 
-
-
 <style>
   :global(*) { box-sizing: border-box; }
   :global(html) {
@@ -1885,7 +1780,6 @@
     --control-text: #44453f;
     --control-active: #11110f;
     --grid-weak-theme: #deded8;
-    --grid-strong-theme: #a9aaa3;
     --border: #d3d3cd;
     --panel-border: #cecec8;
     --hover: #e7e7e1;
@@ -1900,13 +1794,8 @@
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
     --icon-device: #4d7fa8;
-    --icon-device-hover: #3e7099;
-    --icon-archive: #c96f45;
-    --icon-archive-hover: #c96f45;
-    --icon-recovery: #805bb5;
-    --icon-recovery-hover: #6f49a5;
+    --icon-archive: #b75f63;
     --icon-theme: #b18a22;
-    --icon-theme-hover: #957317;
     --danger: #9b332b;
     background: var(--bg);
     color-scheme: light;
@@ -1919,7 +1808,6 @@
     --control-text: #c8c9c2;
     --control-active: #f2f2ec;
     --grid-weak-theme: #293031;
-    --grid-strong-theme: #505a5b;
     --border: #343c3d;
     --panel-border: #414a4b;
     --hover: #1b2122;
@@ -1934,13 +1822,8 @@
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
     --icon-device: #79a5c8;
-    --icon-device-hover: #91b8d7;
-    --icon-archive: #dd8757;
-    --icon-archive-hover: #dd8757;
-    --icon-recovery: #ad83d7;
-    --icon-recovery-hover: #c09be2;
+    --icon-archive: #cf777b;
     --icon-theme: #d7ba58;
-    --icon-theme-hover: #e6cd76;
     --danger: #e58d82;
     color-scheme: dark;
   }
@@ -1966,7 +1849,6 @@
     --line: 1px;
     --grid: var(--grid-weak-theme);
     --grid-weak: var(--grid);
-    --grid-strong: var(--grid);
     --page-inset: 16px;
     min-height: 100dvh;
     padding: 0;
@@ -2132,11 +2014,8 @@
     border-bottom-color: var(--control-active);
   }
   @media (hover: hover) and (pointer: fine) {
-    .tool-icon:hover::before {
-      border-color: var(--grid-strong);
-      background: var(--hover);
-    }
-    .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid-strong); }
+    .tool-icon:hover::before { opacity: .12; }
+    .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
     .panel-button-danger:not(:disabled):hover { color: var(--danger); }
     .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
     .month-button:hover,
@@ -2215,18 +2094,16 @@
     opacity: 1;
     background: transparent;
     -webkit-tap-highlight-color: transparent;
-    transition: transform 110ms ease;
   }
   .tool-icon::before {
     content: '';
     position: absolute;
     width: 36px;
     height: 36px;
-    border: 1px solid transparent;
-    border-radius: 0;
-    background: transparent;
+    background: currentColor;
+    opacity: 0;
     pointer-events: none;
-    transition: border-color 110ms ease, background-color 110ms ease;
+    transition: opacity 110ms ease;
   }
   .device-tool { color: var(--icon-device); }
   .archive-tool { color: var(--icon-archive); }
@@ -2246,7 +2123,9 @@
   }
   .tool-icon .icon-fill { fill: currentColor; }
   .tool-icon .icon-cutout { fill: var(--bg); }
-  .tool-icon:active { transform: scale(.92); }
+  .tool-icon:active::before { opacity: .18; }
+  .tool-icon:focus-visible { outline: none; }
+  .tool-icon:focus-visible::before { opacity: .12; }
 
   .day-head-strip {
     position: relative;
@@ -2254,10 +2133,6 @@
     display: flex;
     align-items: stretch;
     width: max-content;
-  }
-  .history-head-spacer {
-    height: var(--day-size);
-    background: transparent;
   }
   .day-head {
     width: var(--day-size);
@@ -2302,26 +2177,13 @@
     height: var(--day-size);
     border-bottom: var(--line) solid var(--grid);
   }
-  td:not(.history-intro-row):not(.history-intro-add-spacer) {
+  td {
     width: var(--day-size);
     min-width: var(--day-size);
     max-width: var(--day-size);
   }
-  .history-intro-row {
-    position: relative;
-    height: var(--day-size);
-    padding: 0;
-    background: var(--bg);
-  }
-  .history-intro-add-spacer {
-    height: var(--day-size);
-    padding: 0;
-    border: 0;
-    background: var(--bg);
-  }
-  /* Vertical rules begin at the first habit row and never enter the header band. */
-  tbody tr:not(.add-row) td:not(.history-intro-row):not(.history-intro-add-spacer) { position: relative; }
-  tbody tr:not(.add-row) td:not(.history-intro-row):not(.history-intro-add-spacer)::before {
+tbody tr:not(.add-row) td { position: relative; }
+  tbody tr:not(.add-row) td::before {
     content: '';
     position: absolute;
     z-index: 3;
@@ -2332,9 +2194,7 @@
     background: var(--grid);
     pointer-events: none;
   }
-
-  /* The sticky habit/timeline divider owns the first body vertical boundary. */
-  tbody tr:not(.add-row) .habit-name + td::before { display: none; }
+tbody tr:not(.add-row) .habit-name + td::before { display: none; }
 
   .habit-name {
     position: sticky;
@@ -2467,35 +2327,27 @@
     background: var(--bg);
   }
   .zero-tutorial {
-    width: min(420px, calc(100% - (var(--page-inset) * 2)));
+    width: min(460px, calc(100% - (var(--page-inset) * 2)));
     margin: 28px auto 0;
-    display: grid;
-    justify-items: center;
-    gap: 7px;
     padding: 8px 0 24px;
     color: var(--muted);
-    text-align: center;
     font-size: 10px;
-    line-height: 1.45;
+    line-height: 1.55;
   }
+  .zero-tutorial-list {
+    width: max-content;
+    max-width: 100%;
+    margin: 0 auto;
+    padding-left: 18px;
+    display: grid;
+    gap: 7px;
+    text-align: left;
+  }
+  .zero-tutorial-list li::marker { color: var(--muted); }
   .zero-tutorial strong {
-    margin-bottom: 2px;
     color: var(--text);
     font-size: 11px;
     font-weight: 500;
-  }
-  .zero-state-key {
-    display: flex;
-    align-items: baseline;
-    justify-content: center;
-    gap: 16px;
-    min-height: 18px;
-  }
-  .zero-state-key span {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-    white-space: nowrap;
   }
   .zero-tutorial b {
     color: var(--timeline-mark);
@@ -2511,6 +2363,10 @@
     height: var(--day-size);
     border: 0;
     background: transparent;
+  }
+  .add-row,
+  .add-row * {
+    touch-action: pan-y;
   }
   .state-legend {
     position: sticky;
@@ -2552,8 +2408,7 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: var(--today-fill); }
-  /* Every non-today timeline column uses the same color treatment. */
-  tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
+tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   td.prestart { background: transparent; }
   td.locked .cell,
   td.prestart .cell { cursor: default; }
@@ -2612,7 +2467,7 @@
     line-height: 1;
     transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
   }
-  .panel-button-primary { border-color: var(--grid-strong); }
+  .panel-button-primary { border-color: var(--grid); }
   .panel-button:disabled { opacity: .38; cursor: default; }
   .panel-button:not(:disabled):active { background: var(--press-fill); }
   .qr { display: block; width: min(250px, 76vw); margin: 10px auto 18px; image-rendering: pixelated; }
@@ -2654,7 +2509,12 @@
     line-height: 1.45;
   }
   .restore-code-input::placeholder { color: var(--muted); opacity: .7; }
-  .restore-code-input:focus { border-color: var(--grid-strong); }
+  .restore-code-input:focus { border-color: var(--grid); }
+  .recovery-code-box code {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    line-height: 1.55;
+  }
   .recovery-error { margin: 0 0 8px !important; color: var(--danger) !important; font-size: 10px !important; }
   .archive-section,
   .archive-empty-state,
@@ -2726,7 +2586,5 @@
   .archive-toast span { overflow: hidden; text-overflow: ellipsis; }
   .archive-toast strong { font-weight: 600; }
   .archive-toast button { flex: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
-
-
 
 </style>

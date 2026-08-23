@@ -27,7 +27,6 @@ export async function GET(event: RequestEvent) {
   });
 }
 
-
 export async function DELETE(event: RequestEvent) {
   const { id } = event.params;
   await assertBoard(event, id);

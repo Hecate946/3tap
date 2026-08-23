@@ -40,6 +40,3 @@ create table if not exists public.entries (
 alter table public.boards enable row level security;
 alter table public.habits enable row level security;
 alter table public.entries enable row level security;
-
--- No public policies by design. 3tap's browser talks only to SvelteKit API routes;
--- those server routes authenticate boards and use the Supabase secret key.

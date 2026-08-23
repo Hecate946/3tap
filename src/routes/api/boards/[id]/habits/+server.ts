@@ -57,9 +57,6 @@ export async function PUT(event: RequestEvent) {
     id: collisions.has(habit.id) ? randomUUID() : habit.id
   }));
   const incomingIds = new Set(safeCleaned.map((habit) => habit.id));
-
-  // Missing active habits are archived, never deleted. Already-archived habits
-  // remain archived unless they are explicitly included in the active list again.
   const archivedNow = [...activeIds].filter((habitId) => !incomingIds.has(habitId));
   if (archivedNow.length) {
     const { error: archiveError } = await db

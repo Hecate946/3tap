@@ -7,10 +7,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
     "deploy": "wrangler deploy",
-    "preview": "wrangler dev",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "dev:web": "vite dev",
-    "build:web": "vite build",
     "db:reset": "npx --yes supabase@latest db reset --local",
     "db:stop": "npx --yes supabase@latest stop"
   },

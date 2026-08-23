@@ -15,10 +15,6 @@ export async function DELETE(event: RequestEvent) {
   if (habitError) throw error(500, habitError.message);
   if (!habit) throw error(404, 'Habit not found');
   if (!habit.archived_at) throw error(409, 'Archive the habit before deleting it');
-
-  // Touch the board *before* deleting. If the board write is unavailable, the
-  // habit remains intact instead of being deleted and then returning an error.
-  // The timestamp also invalidates other devices' conditional board cache.
   const { error: touchError } = await db
     .from('boards')
     .update({ updated_at: new Date().toISOString() })
@@ -31,9 +27,5 @@ export async function DELETE(event: RequestEvent) {
     .eq('board_id', id)
     .eq('id', habitId);
   if (deleteError) throw error(500, deleteError.message);
-
-  // The client already updates Archive optimistically and then reconciles with
-  // the canonical board. Avoid a second post-delete database read here so a
-  // successful delete can never be reported as failed by unrelated response work.
   return new Response(null, { status: 204 });
 }
