@@ -1,24 +1,48 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createClient } from '@supabase/supabase-js';
-import { env } from '$env/dynamic/private';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { env as svelteEnv } from '$env/dynamic/private';
 import { error, type RequestEvent } from '@sveltejs/kit';
 
-function requireEnv(name: 'SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY') {
-  const value = env[name];
-  if (!value) throw new Error(`${name} is not configured`);
+function serverEnv(name: 'SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY') {
+  // Cloudflare Workers exposes runtime Variables/Secrets through process.env when
+  // nodejs_compat is enabled. SvelteKit's dynamic private env remains the local
+  // development fallback.
+  const value = process.env[name] || svelteEnv[name];
+  if (!value) {
+    throw new Error(
+      `${name} is missing at runtime. Add it to Cloudflare Worker > Settings > Variables and Secrets.`
+    );
+  }
   return value;
 }
 
-export const db = createClient(
-  requireEnv('SUPABASE_URL'),
-  requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    }
+let client: SupabaseClient | null = null;
+
+function getDb() {
+  if (!client) {
+    client = createClient(
+      serverEnv('SUPABASE_URL'),
+      serverEnv('SUPABASE_SERVICE_ROLE_KEY'),
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false
+        }
+      }
+    );
   }
-);
+  return client;
+}
+
+// Keep the existing db.from(...) API while creating the client lazily on the
+// first request. This avoids failing the entire Worker module during startup.
+export const db = new Proxy({} as SupabaseClient, {
+  get(_target, property) {
+    const database = getDb() as unknown as Record<PropertyKey, unknown>;
+    const value = database[property];
+    return typeof value === 'function' ? value.bind(database) : value;
+  }
+});
 
 export function hashSecret(secret: string) {
   return createHash('sha256').update(secret).digest('hex');
