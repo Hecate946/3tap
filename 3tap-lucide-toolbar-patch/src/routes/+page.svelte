@@ -24,21 +24,14 @@
   let online = true;
   let theme: 'light' | 'dark' = 'light';
   let navScrolled = false;
-  let panel: 'none' | 'pair' | 'recovery' | 'archived' | 'delete' | 'clear' = 'none';
+  let panel: 'none' | 'pair' | 'recovery' | 'archived' | 'delete' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
   let recoveryInput = '';
-  let restoreCodeInput = '';
-  let recoveryError = '';
-  let recovering = false;
-  let recoveryCopied = false;
-  let pairingCopied = false;
   let archiveToast: { habit: Habit; index: number } | null = null;
   let archiveToastTimer: ReturnType<typeof setTimeout> | undefined;
   let deleteHabitTarget: Habit | null = null;
   let deletingHabit = false;
-  let archiveError = '';
-  let clearingArchive = false;
   let editingHabitId: string | null = null;
   let editingHabitName = '';
   let addingHabit = false;
@@ -668,16 +661,7 @@
 
   async function openPair() {
     if (!credentials) return;
-    pairingCopied = false;
     panel = 'pair';
-
-    // Give the new device the freshest server state we can before pairing.
-    // The pairing link itself remains usable even if a background sync fails.
-    if (navigator.onLine) {
-      await flushHabitChanges();
-      await flushQueue();
-    }
-
     const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
     if (pairingLink !== nextLink) {
       pairingLink = nextLink;
@@ -691,12 +675,6 @@
         color: { dark: '#11110f', light: '#f7f7f5' }
       });
     }
-  }
-
-  async function copyPairingLink() {
-    await copyText(pairingLink);
-    pairingCopied = true;
-    setTimeout(() => (pairingCopied = false), 1400);
   }
 
   function normalizeHabits(habits: Habit[]) {
@@ -751,6 +729,7 @@
         habitFlushPromise = null;
         if (pendingHabitSave && navigator.onLine) {
           if (habitFlushTimer) clearTimeout(habitFlushTimer);
+      if (archiveToastTimer) clearTimeout(archiveToastTimer);
           habitFlushTimer = setTimeout(() => {
             habitFlushTimer = undefined;
             void flushHabitChanges();
@@ -1013,15 +992,8 @@
   }
 
   function confirmPermanentDelete(habit: Habit) {
-    archiveError = '';
     deleteHabitTarget = habit;
     panel = 'delete';
-  }
-
-  function confirmClearArchive() {
-    if (!board?.archivedHabits?.length) return;
-    archiveError = '';
-    panel = 'clear';
   }
 
   function archivedHistoryDays(habit: Habit) {
@@ -1033,94 +1005,24 @@
     return Math.max(1, calendarDayDistance(startDay, endDay) + 1);
   }
 
-  async function apiErrorMessage(response: Response, fallback: string) {
-    const detail = (await response.text()).trim();
-    if (!detail) return fallback;
-    try {
-      const parsed = JSON.parse(detail) as { message?: unknown };
-      if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message.trim();
-    } catch {
-      // Plain-text API errors are valid too.
-    }
-    return detail;
-  }
-
   async function deleteHabitForever() {
     if (!credentials || !board || !deleteHabitTarget || deletingHabit) return;
-    const target = deleteHabitTarget;
     deletingHabit = true;
-    archiveError = '';
-
     try {
-      const response = await fetch(`/api/boards/${credentials.boardId}/habits/${target.id}`, {
+      const response = await fetch(`/api/boards/${credentials.boardId}/habits/${deleteHabitTarget.id}`, {
         method: 'DELETE',
         headers: authHeaders(credentials)
       });
-
-      // A 404 means the server already removed it, so local state can safely
-      // converge to the same result instead of trapping the confirmation UI.
-      if (!response.ok && response.status !== 404) {
-        throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
-      }
-
-      board = {
-        ...board,
-        archivedHabits: (board.archivedHabits ?? []).filter((habit) => habit.id !== target.id),
-        entries: (board.entries ?? []).filter((entry) => entry.habitId !== target.id)
-      };
+      if (!response.ok) throw new Error(await response.text());
+      const saved: Board = await response.json();
+      board = saved;
       hydrateEntries(board);
       pendingHabitSave = null;
       deleteHabitTarget = null;
-      persistLocalStateNow();
       panel = 'archived';
-
-      // Reconcile quietly with the canonical board after the modal has already
-      // returned to Archive. This keeps the UI responsive and avoids depending
-      // on a particular DELETE response body shape.
-      void fetchBoard(true).catch(() => {});
-    } catch (error) {
-      archiveError = error instanceof Error ? error.message : 'could not delete · retry';
+      persistLocalStateNow();
     } finally {
       deletingHabit = false;
-    }
-  }
-
-  async function clearArchive() {
-    if (!credentials || !board || clearingArchive) return;
-    const archived = [...(board.archivedHabits ?? [])];
-    if (!archived.length) {
-      panel = 'archived';
-      return;
-    }
-
-    clearingArchive = true;
-    archiveError = '';
-    try {
-      for (const habit of archived) {
-        const response = await fetch(`/api/boards/${credentials.boardId}/habits/${habit.id}`, {
-          method: 'DELETE',
-          headers: authHeaders(credentials)
-        });
-        if (!response.ok && response.status !== 404) {
-          throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
-        }
-      }
-
-      const archivedIds = new Set(archived.map((habit) => habit.id));
-      board = {
-        ...board,
-        archivedHabits: [],
-        entries: (board.entries ?? []).filter((entry) => !archivedIds.has(entry.habitId))
-      };
-      hydrateEntries(board);
-      pendingHabitSave = null;
-      persistLocalStateNow();
-      panel = 'archived';
-      void fetchBoard(true).catch(() => {});
-    } catch (error) {
-      archiveError = error instanceof Error ? error.message : 'could not clear archive · retry';
-    } finally {
-      clearingArchive = false;
     }
   }
 
@@ -1150,86 +1052,32 @@
 
   function openRecovery() {
     recoveryInput = credentials ? `${credentials.boardId}.${credentials.secret}` : '';
-    restoreCodeInput = '';
-    recoveryError = '';
-    recoveryCopied = false;
-    recovering = false;
     panel = 'recovery';
   }
 
-  function parseRecoveryCode(raw: string): Credentials | null {
-    const token = raw.trim().replace(/^.*#/, '');
-    const separator = token.indexOf('.');
-    if (separator < 1) return null;
-    const boardId = token.slice(0, separator).trim();
-    const secret = token.slice(separator + 1).trim();
-    if (!boardId || secret.length < 20) return null;
-    return { boardId, secret };
-  }
-
   async function useRecoveryCode() {
-    if (recovering) return;
-    recoveryError = '';
-    const next = parseRecoveryCode(restoreCodeInput);
-    if (!next) {
-      recoveryError = 'Enter a complete recovery code.';
-      return;
-    }
-    if (!navigator.onLine) {
-      recoveryError = 'Connect to the internet to verify this code.';
-      return;
-    }
+    const token = recoveryInput.trim().replace(/^.*#/, '');
+    const separator = token.indexOf('.');
+    if (separator < 1) return;
+    const next = { boardId: token.slice(0, separator), secret: token.slice(separator + 1) };
+    if (!next.boardId || !next.secret) return;
 
-    recovering = true;
-    try {
-      // Validate first. Never replace this device's current credentials with an
-      // unverified code.
-      const response = await fetch(`/api/boards/${encodeURIComponent(next.boardId)}`, {
-        headers: authHeaders(next)
-      });
-      if (response.status === 401 || response.status === 404) {
-        recoveryError = 'That recovery code is not valid.';
-        return;
-      }
-      if (!response.ok) throw new Error(await response.text());
-
-      const recoveredBoard: Board = await response.json();
-
-      // Commit the board switch only after successful verification so a typo can
-      // never strand the device on invalid credentials or stale cached data.
-      credentials = next;
-      board = recoveredBoard;
-      setCredentials(next);
-      setCachedBoard(recoveredBoard);
-      setQueue([]);
-      pendingByCell.clear();
-      localTapValues.clear();
-      pendingHabitSave = null;
-      entries.clear();
-      hydrateEntries(recoveredBoard);
-      qrDataUrl = '';
-      pairingLink = '';
-      panel = 'none';
-      await tick();
-      await scrollToToday();
-    } catch {
-      recoveryError = 'Could not verify that code. Try again.';
-    } finally {
-      recovering = false;
-    }
-  }
-
-  async function copyRecoveryCode() {
-    await copyText(recoveryInput);
-    recoveryCopied = true;
-    setTimeout(() => (recoveryCopied = false), 1400);
+    setCredentials(next);
+    credentials = next;
+    board = null;
+    entries.clear();
+    qrDataUrl = '';
+    pairingLink = '';
+    pendingByCell.clear();
+    setQueue([]);
+    await fetchBoard(true);
+    panel = 'none';
+    await scrollToToday();
   }
 
   async function copyText(text: string) {
     await navigator.clipboard.writeText(text);
   }
-
-
 
   function scheduleNextDay() {
     if (dayTimer) clearTimeout(dayTimer);
@@ -1435,26 +1283,27 @@
             <div class="timeline-side">
               <nav class="timeline-controls" aria-label="App controls">
                 <button class="tool-icon device-tool" aria-label="Add device" title="Add device" onclick={openPair}>
-                  <!-- Lucide-inspired filled Smartphone -->
+                  <!-- Lucide: LogIn -->
                   <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="5" y="2" width="14" height="20" rx="2.25" class="icon-fill" stroke="none"></rect>
-                    <rect x="7" y="4" width="10" height="14" rx=".75" class="icon-cutout" stroke="none"></rect>
-                    <circle cx="12" cy="20" r=".8" class="icon-cutout" stroke="none"></circle>
+                    <path d="m10 17 5-5-5-5"></path>
+                    <path d="M15 12H3"></path>
+                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
                   </svg>
                 </button>
-                <button class="tool-icon archive-tool" aria-label="Archive" title="Archive" onclick={openArchived}>
-                  <!-- Lucide-inspired filled Archive -->
+                <button class="tool-icon archive-tool" aria-label={`Archive${(board?.archivedHabits?.length ?? 0) > 0 ? `, ${board?.archivedHabits?.length ?? 0} items` : ''}`} title="Archive" onclick={openArchived}>
+                  <!-- Lucide: Archive -->
                   <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="3" y="7" width="18" height="14" rx="2" class="icon-fill" stroke="none"></rect>
-                    <rect x="2" y="3" width="20" height="5" rx="1.5" class="icon-fill" stroke="none"></rect>
-                    <rect x="9" y="11" width="6" height="2" rx="1" class="icon-cutout" stroke="none"></rect>
+                    <rect width="20" height="5" x="2" y="3" rx="1"></rect>
+                    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"></path>
+                    <path d="M10 12h4"></path>
                   </svg>
+                  {#if (board?.archivedHabits?.length ?? 0) > 0}<span class="archive-count">{board?.archivedHabits?.length ?? 0}</span>{/if}
                 </button>
                 <button class="tool-icon recovery-tool" aria-label="Recovery" title="Recovery" onclick={openRecovery}>
-                  <!-- Lucide: KeyRound, optically inset so the stroke never clips -->
-                  <svg class="key-icon" viewBox="-1 -1 26 26" aria-hidden="true">
-                    <path d="M3.5 18.5 10 12a6 6 0 1 1 2 2l-2 2H7v3H4v3H2v-3.5a2 2 0 0 1 .6-1.4z"></path>
-                    <circle cx="16.5" cy="7.5" r="1.25" class="icon-fill" stroke="none"></circle>
+                  <!-- Lucide: KeyRound -->
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3.172a2 2 0 0 0 1.414-.586l8.704-8.704a6.5 6.5 0 1 0-3-3z"></path>
+                    <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" stroke="none"></circle>
                   </svg>
                 </button>
                 <button
@@ -1466,7 +1315,7 @@
                   {#if theme === 'dark'}
                     <!-- Lucide: Sun -->
                     <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
+                      <circle cx="12" cy="12" r="4"></circle>
                       <path d="M12 2v2"></path>
                       <path d="M12 20v2"></path>
                       <path d="m4.93 4.93 1.41 1.41"></path>
@@ -1477,9 +1326,9 @@
                       <path d="m19.07 4.93-1.41 1.41"></path>
                     </svg>
                   {:else}
-                    <!-- Lucide-inspired filled Moon -->
+                    <!-- Lucide: Moon -->
                     <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path>
+                      <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9"></path>
                     </svg>
                   {/if}
                 </button>
@@ -1551,12 +1400,7 @@
                         title="Archive"
                         onclick={() => archiveHabit(habitIndex)}
                       >
-                        <svg class="row-archive-icon" viewBox="0 0 16 16" aria-hidden="true">
-                          <path d="M4.25 5.25h7.5v7.25h-7.5z" />
-                          <path d="M5.25 3.25h5.5" />
-                          <path d="M8 7v3.25" />
-                          <path d="m6.5 8.75 1.5 1.5 1.5-1.5" />
-                        </svg>
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 4.75 6.5 6.5m0-6.5-6.5 6.5" /></svg>
                       </button>
                     </div>
                   </div>
@@ -1585,14 +1429,14 @@
                       class="cell"
                       disabled={!editable}
                       aria-label={prestart
-                        ? `${habit.name}, ${date.key}: before this habit existed`
+                        ? `${habit.name}, ${date.key}: before tracking began`
                         : `${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', locked'}`}
                       onpointerdown={(event) => {
                         if (event.button === 0) tapCell(habit.id, date.key, event.currentTarget);
                       }}
                       onclick={(event) => {
                         if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}>{prestart ? '·' : symbols[value]}</button>
+                      }}>{symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
@@ -1623,14 +1467,7 @@
                   aria-hidden="true"
                 ></td>
               {/if}
-              <td class="add-spacer" colspan={dates.length}>
-                <div class="state-legend" aria-label="Habit mark legend">
-                  <span><b>·</b> before</span>
-                  <span><b>-</b> missed</span>
-                  <span><b>|</b> done</span>
-                  <span><b>+</b> great</span>
-                </div>
-              </td>
+              <td class="add-spacer" colspan={dates.length}></td>
             </tr>
           </tbody>
         </table>
@@ -1659,108 +1496,45 @@
       <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
 
       {#if panel === 'pair'}
-        <div class="panel-heading">
-          <h2>add device</h2>
-          <p>Open 3tap on another device, then scan this code. Both devices will use the same board and stay in sync.</p>
-        </div>
-        {#if qrDataUrl}<img class="qr pair-qr" src={qrDataUrl} alt="QR code for pairing another device" />{/if}
-        <button class="panel-button panel-button-primary" onclick={copyPairingLink}>
-          {pairingCopied ? 'link copied' : 'copy pairing link'}
-        </button>
-        <p class="privacy-note">Keep this link private. Anyone with it can open this board.</p>
+        <h2>add device</h2>
+        <p>scan this on the other device.</p>
+        {#if qrDataUrl}<img class="qr" src={qrDataUrl} alt="Pairing QR code" />{/if}
+        <button class="action" onclick={() => copyText(pairingLink)}>copy sync link</button>
       {:else if panel === 'recovery'}
-        <div class="panel-heading">
-          <h2>recovery</h2>
-          <p>Your recovery code is a private backup key for this board.</p>
-        </div>
-
-        <div class="recovery-section">
-          <div class="panel-label">this board</div>
-          <p class="section-help">Save this somewhere private. You can use it to restore this board on another device.</p>
-          <div class="code-box">
-            <code>{recoveryInput}</code>
-          </div>
-          <button class="panel-button" onclick={copyRecoveryCode}>{recoveryCopied ? 'copied' : 'copy recovery code'}</button>
-        </div>
-
-        <div class="panel-divider"></div>
-
-        <div class="recovery-section">
-          <label class="panel-label" for="restore-code">open another board</label>
-          <p class="section-help">Paste another board's recovery code. This changes only the board stored on this device.</p>
-          <textarea
-            id="restore-code"
-            class="restore-code-input"
-            bind:value={restoreCodeInput}
-            rows="2"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="paste recovery code"
-            oninput={() => (recoveryError = '')}
-          ></textarea>
-          {#if recoveryError}<p class="recovery-error" role="alert">{recoveryError}</p>{/if}
-          <button class="panel-button panel-button-primary" disabled={recovering || !restoreCodeInput.trim()} onclick={useRecoveryCode}>
-            {recovering ? 'checking…' : 'open board'}
-          </button>
+        <h2>recovery</h2>
+        <p>save this code somewhere private. anyone with it can open this board.</p>
+        <textarea bind:value={recoveryInput} rows="4" spellcheck="false"></textarea>
+        <div class="panel-actions">
+          <button class="text-button" onclick={() => copyText(recoveryInput)}>copy</button>
+          <button class="action" onclick={useRecoveryCode}>use code</button>
         </div>
       {:else if panel === 'archived'}
-        <div class="panel-heading">
-          <h2>archive</h2>
-          <p>Archived habits keep their history. Restore one anytime, or delete it permanently.</p>
-        </div>
-
+        <h2>archive</h2>
         {#if (board?.archivedHabits?.length ?? 0) === 0}
-          <div class="archive-empty-state">
-            <div class="panel-label">archived habits</div>
-            <p class="section-help">Nothing is archived right now.</p>
-          </div>
+          <p>no archived habits.</p>
         {:else}
-          <div class="archive-section">
-            <div class="panel-label">archived habits</div>
-            <div class="archived-list">
-              {#each board?.archivedHabits ?? [] as habit (habit.id)}
-                {@const historyDays = archivedHistoryDays(habit)}
-                <div class="archived-item">
-                  <div class="archived-copy">
-                    <strong>{habit.name}</strong>
-                    <span>history: {historyDays} {historyDays === 1 ? 'day' : 'days'}</span>
-                  </div>
-                  <div class="archived-actions">
-                    <button class="panel-button" onclick={() => restoreArchivedHabit(habit, habit.position)}>restore</button>
-                    <button class="panel-button panel-button-danger" onclick={() => confirmPermanentDelete(habit)}>delete</button>
-                  </div>
+          <div class="archived-list">
+            {#each board?.archivedHabits ?? [] as habit (habit.id)}
+              <div class="archived-item">
+                <div class="archived-copy">
+                  <strong>{habit.name}</strong>
+                  <span>{archivedHistoryDays(habit)} days of history</span>
                 </div>
-              {/each}
-            </div>
-          </div>
-
-          <div class="panel-divider"></div>
-
-          <div class="archive-danger-section">
-            <div class="panel-label">clear archive</div>
-            <p class="section-help">Permanently delete every archived habit and all of their history.</p>
-            <button class="panel-button panel-button-danger" onclick={confirmClearArchive}>clear all</button>
+                <div class="archived-actions">
+                  <button class="text-button" onclick={() => restoreArchivedHabit(habit, habit.position)}>restore</button>
+                  <button class="danger-button" onclick={() => confirmPermanentDelete(habit)}>delete forever</button>
+                </div>
+              </div>
+            {/each}
           </div>
         {/if}
       {:else if panel === 'delete' && deleteHabitTarget}
-        {@const historyDays = archivedHistoryDays(deleteHabitTarget)}
-        <h2>delete {deleteHabitTarget.name}?</h2>
-        <p>permanently delete this habit and its {historyDays} {historyDays === 1 ? 'day' : 'days'} of history?</p>
-        {#if archiveError}<p class="archive-error" role="alert">{archiveError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={deletingHabit} onclick={deleteHabitForever}>
-            {deletingHabit ? 'deleting…' : 'delete'}
-          </button>
-        </div>
-      {:else if panel === 'clear'}
-        <h2>clear archive?</h2>
-        <p>permanently delete all {board?.archivedHabits?.length ?? 0} archived habits and their history?</p>
-        {#if archiveError}<p class="archive-error" role="alert">{archiveError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={clearingArchive} onclick={clearArchive}>
-            {clearingArchive ? 'clearing…' : 'clear all'}
+        <h2>delete {deleteHabitTarget.name} forever?</h2>
+        <p>this permanently deletes all {archivedHistoryDays(deleteHabitTarget)} days of history for this habit.</p>
+        <div class="panel-actions">
+          <button class="text-button" onclick={() => (panel = 'archived')}>cancel</button>
+          <button class="danger-button danger-confirm" disabled={deletingHabit} onclick={deleteHabitForever}>
+            {deletingHabit ? 'deleting…' : 'delete forever'}
           </button>
         </div>
       {/if}
@@ -1774,8 +1548,6 @@
     <button onclick={undoArchiveToast}>undo</button>
   </div>
 {/if}
-
-
 
 <style>
   :global(*) { box-sizing: border-box; }
@@ -1791,24 +1563,22 @@
     --border: #d3d3cd;
     --panel-border: #cecec8;
     --hover: #e7e7e1;
-    --timeline-text: #62635d;
-    --timeline-mark: #555650;
-    --today-accent: #2f70b7;
-    --today-fill: rgba(47,112,183,.10);
+    --today-fill: rgba(17,17,15,.085);
+    --prestart-fill: rgba(17,17,15,.018);
     --press-fill: rgba(17,17,15,.13);
     --selection-bg: #b8d7ff;
     --selection-text: #0b1b2b;
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
-    --icon-device: #4d7fa8;
-    --icon-device-hover: #3e7099;
-    --icon-archive: #c96f45;
-    --icon-archive-hover: #c96f45;
-    --icon-recovery: #805bb5;
-    --icon-recovery-hover: #6f49a5;
-    --icon-theme: #b18a22;
-    --icon-theme-hover: #957317;
+    --icon-device: #2563eb;
+    --icon-device-hover: #1d4ed8;
+    --icon-archive: #c45b12;
+    --icon-archive-hover: #9a4310;
+    --icon-recovery: #7c3aed;
+    --icon-recovery-hover: #6d28d9;
+    --icon-theme: #4f46e5;
+    --icon-theme-hover: #4338ca;
     --danger: #9b332b;
     background: var(--bg);
     color-scheme: light;
@@ -1825,24 +1595,22 @@
     --border: #40413c;
     --panel-border: #4a4b45;
     --hover: #252620;
-    --timeline-text: #a9aaa3;
-    --timeline-mark: #b5b6af;
-    --today-accent: #79aef2;
-    --today-fill: rgba(121,174,242,.12);
+    --today-fill: rgba(255,255,248,.115);
+    --prestart-fill: rgba(255,255,248,.028);
     --press-fill: rgba(255,255,248,.16);
     --selection-bg: #315f8f;
     --selection-text: #ffffff;
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
-    --icon-device: #79a5c8;
-    --icon-device-hover: #91b8d7;
-    --icon-archive: #dd8757;
-    --icon-archive-hover: #dd8757;
-    --icon-recovery: #ad83d7;
-    --icon-recovery-hover: #c09be2;
-    --icon-theme: #d7ba58;
-    --icon-theme-hover: #e6cd76;
+    --icon-device: #60a5fa;
+    --icon-device-hover: #93c5fd;
+    --icon-archive: #fb923c;
+    --icon-archive-hover: #fdba74;
+    --icon-recovery: #a78bfa;
+    --icon-recovery-hover: #c4b5fd;
+    --icon-theme: #818cf8;
+    --icon-theme-hover: #a5b4fc;
     --danger: #e58d82;
     color-scheme: dark;
   }
@@ -1996,14 +1764,13 @@
     width: 100%;
     max-height: min(432px, calc(100dvh - (var(--day-size) * 2) - 12px));
     overflow-y: auto;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
     background: var(--bg);
     border: var(--line) solid var(--grid);
+    scrollbar-width: thin;
+    scrollbar-color: var(--grid) transparent;
   }
-  .month-menu::-webkit-scrollbar { display: none; }
+  .month-menu::-webkit-scrollbar { width: 6px; }
+  .month-menu::-webkit-scrollbar-thumb { background: var(--grid); }
   .month-option {
     width: 100%;
     height: 36px;
@@ -2034,13 +1801,10 @@
     border-bottom-color: var(--control-active);
   }
   @media (hover: hover) and (pointer: fine) {
-    .tool-icon:hover::before {
-      border-color: var(--grid-strong);
-      background: var(--hover);
-    }
-    .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid-strong); }
-    .panel-button-danger:not(:disabled):hover { color: var(--danger); }
-    .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
+    .device-tool:hover { color: var(--icon-device-hover); }
+    .archive-tool:hover { color: var(--icon-archive-hover); }
+    .recovery-tool:hover { color: var(--icon-recovery-hover); }
+    .theme-toggle:hover { color: var(--icon-theme-hover); }
     .month-button:hover,
     .year-button:hover,
     .nav-today:hover {
@@ -2115,43 +1879,38 @@
     display: grid;
     place-items: center;
     opacity: 1;
-    background: transparent;
+    transition: color 100ms linear, background-color 100ms linear;
     -webkit-tap-highlight-color: transparent;
-    transition: transform 110ms ease;
-  }
-  .tool-icon::before {
-    content: '';
-    position: absolute;
-    width: 36px;
-    height: 36px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: transparent;
-    pointer-events: none;
-    transition: border-color 110ms ease, background-color 110ms ease;
   }
   .device-tool { color: var(--icon-device); }
   .archive-tool { color: var(--icon-archive); }
   .recovery-tool { color: var(--icon-recovery); }
   .theme-toggle { color: var(--icon-theme); }
   .tool-icon svg {
-    position: relative;
-    z-index: 1;
-    width: 24px;
-    height: 24px;
-    overflow: visible;
+    width: 16px;
+    height: 16px;
     fill: none;
     stroke: currentColor;
-    stroke-width: 2;
+    stroke-width: 1.5;
     stroke-linecap: round;
     stroke-linejoin: round;
     pointer-events: none;
   }
-  .tool-icon .icon-fill { fill: currentColor; }
-  .tool-icon .icon-cutout { fill: var(--bg); }
-  .tool-icon .key-icon { width: 26px; height: 26px; }
-  .tool-icon:active { transform: scale(.92); }
-
+  .archive-count {
+    position: absolute;
+    top: 7px;
+    left: calc(50% + 7px);
+    min-width: 12px;
+    height: 12px;
+    display: grid;
+    place-items: center;
+    padding: 0 2px;
+    background: var(--bg);
+    color: var(--muted);
+    font-size: 8px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
   .day-head-strip {
     position: relative;
     z-index: 2;
@@ -2178,18 +1937,16 @@
   .day-head span,
   .day-head strong {
     display: block;
-    color: var(--timeline-text);
     font-weight: 400;
     line-height: 1.15;
-    opacity: 1;
+    opacity: .62;
   }
   .day-head strong { font-size: 11px; }
   .day-head.today { background: var(--today-fill); }
   .day-head.today span,
-  .day-head.today strong {
-    color: var(--today-accent);
-    opacity: 1;
-  }
+  .day-head.today strong { opacity: .96; }
+  .day-head.prestart span,
+  .day-head.prestart strong { opacity: .34; }
   table {
     border-collapse: separate;
     border-spacing: 0;
@@ -2310,11 +2067,6 @@
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .habit-controls .row-archive-icon {
-    width: 17px;
-    height: 17px;
-    stroke-width: 1.45;
-  }
   .habit-controls .delete-habit { color: var(--control-text); }
   .habit-controls button:disabled { opacity: .22; cursor: default; }
   .habit-name {
@@ -2365,29 +2117,6 @@
     border: 0;
     background: transparent;
   }
-  .state-legend {
-    height: var(--day-size);
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 14px;
-    padding-right: var(--page-inset);
-    color: var(--muted);
-    font-size: 9px;
-    white-space: nowrap;
-    opacity: .62;
-    pointer-events: none;
-  }
-  .state-legend span {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-  }
-  .state-legend b {
-    color: var(--timeline-mark);
-    font-size: 11px;
-    font-weight: 500;
-  }
   .add-habit {
     width: 100%;
     height: 100%;
@@ -2398,158 +2127,48 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: var(--today-fill); }
-  /* Every non-today timeline column uses the same color treatment. */
+  /* Tracking start keeps the same 1px grid color as every other boundary. */
   tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
-  td.prestart { background: transparent; }
-  td.locked .cell,
+  td.prestart { background: var(--prestart-fill); }
+  td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
   .cell {
     width: 100%;
     height: 100%;
-    color: var(--timeline-mark);
     font-size: 16px;
     font-weight: 400;
-    opacity: .78;
     touch-action: manipulation;
     user-select: none;
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
   }
-  td.prestart .cell {
-    font-size: 18px;
-    line-height: 1;
-  }
   .cell.plus { font-weight: 750; font-size: 17px; }
-  .cell:disabled { pointer-events: none; }
-  td.today .cell {
-    color: var(--today-accent);
-    opacity: 1;
-  }
+  .cell:disabled { color: inherit; pointer-events: none; }
+  td.locked .cell { opacity: .66; }
+  td.prestart .cell { opacity: .34; }
+  td.today .cell { opacity: 1; }
+  td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .52; }
   .cell:not(:disabled):active { background: var(--press-fill); }
 
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
-  .panel { position: relative; width: min(420px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 22px; scrollbar-width: none; }
-  .panel::-webkit-scrollbar { display: none; }
+  .panel { position: relative; width: min(390px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 24px; }
   .panel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: lowercase; }
-  .panel p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-  .close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; display: grid; place-items: center; font-size: 18px; opacity: .68; }
-  .panel-heading { padding-right: 34px; margin-bottom: 18px; }
-  .panel-heading h2 { margin-bottom: 7px; }
-  .panel-label {
-    display: block;
-    margin-bottom: 5px;
-    color: var(--text);
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: lowercase;
-  }
-  .section-help { margin-bottom: 10px !important; }
-  .panel-divider { height: 1px; margin: 20px 0; background: var(--border); }
-  .panel-button {
-    min-height: 34px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    font-size: 10px;
-    line-height: 1;
-    transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
-  }
-  .panel-button-primary { border-color: var(--grid-strong); }
-  .panel-button:disabled { opacity: .38; cursor: default; }
-  .panel-button:not(:disabled):active { background: var(--press-fill); }
-  .qr { display: block; width: min(250px, 76vw); margin: 10px auto 18px; image-rendering: pixelated; }
-  .pair-qr { border: 1px solid var(--border); }
-  .privacy-note { margin-top: 10px !important; font-size: 10px !important; }
-  .recovery-section { display: grid; justify-items: start; }
-  .code-box {
-    width: 100%;
-    min-height: 54px;
-    display: flex;
-    align-items: center;
-    margin-bottom: 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .code-box code {
-    min-width: 0;
-    color: var(--control-text);
-    font: inherit;
-    font-size: 10px;
-    line-height: 1.45;
-    overflow-wrap: anywhere;
-    user-select: all;
-  }
-  .restore-code-input {
-    width: 100%;
-    min-height: 54px;
-    resize: none;
-    margin: 0 0 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--border);
-    border-radius: 0;
-    outline: none;
-    background: var(--surface);
-    color: var(--text);
-    font-size: 10px;
-    line-height: 1.45;
-  }
-  .restore-code-input::placeholder { color: var(--muted); opacity: .7; }
-  .restore-code-input:focus { border-color: var(--grid-strong); }
-  .recovery-error { margin: 0 0 8px !important; color: var(--danger) !important; font-size: 10px !important; }
-  .archive-section,
-  .archive-empty-state,
-  .archive-danger-section {
-    display: grid;
-    justify-items: start;
-  }
-  .archive-empty-state { padding-top: 2px; }
-  .archived-list {
-    width: 100%;
-    display: grid;
-    margin-top: 2px;
-  }
-  .archived-item {
-    min-width: 0;
-    display: grid;
-    gap: 9px;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .archived-item:first-child { border-top: 1px solid var(--border); }
-  .archived-copy {
-    min-width: 0;
-    display: grid;
-    gap: 3px;
-  }
-  .archived-copy strong {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 12px;
-    font-weight: 600;
-  }
+  .panel p { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+  .close { position: absolute; top: 12px; right: 14px; font-size: 18px; opacity: .68; }
+  .qr { display: block; width: min(280px, 100%); margin: 16px auto 20px; image-rendering: pixelated; }
+  .action { border: 1px solid var(--text); padding: 9px 12px; font-size: 11px; }
+  .text-button { font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+  textarea { resize: vertical; padding: 9px; font-size: 10px; line-height: 1.4; margin-bottom: 14px; }
+  .panel-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
+  .archived-list { display: grid; gap: 0; margin-top: 8px; border-top: 1px solid var(--border); }
+  .archived-item { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 52px; border-bottom: 1px solid var(--border); }
+  .archived-copy { min-width: 0; display: grid; gap: 3px; }
+  .archived-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
   .archived-copy span { color: var(--muted); font-size: 10px; }
-  .archived-actions {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .panel-button-danger { color: var(--danger); }
-  .archive-error { margin: -6px 0 14px !important; color: var(--danger) !important; }
-  .panel-confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 18px;
-  }
+  .archived-actions { flex: none; display: flex; align-items: center; gap: 14px; }
+  .danger-button { color: var(--danger); font-size: 11px; }
+  .danger-button:disabled { opacity: .45; cursor: default; }
+  .danger-confirm { border: 1px solid currentColor; padding: 9px 12px; }
   .archive-toast {
     position: fixed;
     z-index: 120;
@@ -2571,7 +2190,6 @@
   .archive-toast span { overflow: hidden; text-overflow: ellipsis; }
   .archive-toast strong { font-weight: 600; }
   .archive-toast button { flex: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
-
 
 
 </style>

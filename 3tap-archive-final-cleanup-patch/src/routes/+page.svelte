@@ -28,11 +28,6 @@
   let qrDataUrl = '';
   let pairingLink = '';
   let recoveryInput = '';
-  let restoreCodeInput = '';
-  let recoveryError = '';
-  let recovering = false;
-  let recoveryCopied = false;
-  let pairingCopied = false;
   let archiveToast: { habit: Habit; index: number } | null = null;
   let archiveToastTimer: ReturnType<typeof setTimeout> | undefined;
   let deleteHabitTarget: Habit | null = null;
@@ -668,16 +663,7 @@
 
   async function openPair() {
     if (!credentials) return;
-    pairingCopied = false;
     panel = 'pair';
-
-    // Give the new device the freshest server state we can before pairing.
-    // The pairing link itself remains usable even if a background sync fails.
-    if (navigator.onLine) {
-      await flushHabitChanges();
-      await flushQueue();
-    }
-
     const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
     if (pairingLink !== nextLink) {
       pairingLink = nextLink;
@@ -691,12 +677,6 @@
         color: { dark: '#11110f', light: '#f7f7f5' }
       });
     }
-  }
-
-  async function copyPairingLink() {
-    await copyText(pairingLink);
-    pairingCopied = true;
-    setTimeout(() => (pairingCopied = false), 1400);
   }
 
   function normalizeHabits(habits: Habit[]) {
@@ -1033,18 +1013,6 @@
     return Math.max(1, calendarDayDistance(startDay, endDay) + 1);
   }
 
-  async function apiErrorMessage(response: Response, fallback: string) {
-    const detail = (await response.text()).trim();
-    if (!detail) return fallback;
-    try {
-      const parsed = JSON.parse(detail) as { message?: unknown };
-      if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message.trim();
-    } catch {
-      // Plain-text API errors are valid too.
-    }
-    return detail;
-  }
-
   async function deleteHabitForever() {
     if (!credentials || !board || !deleteHabitTarget || deletingHabit) return;
     const target = deleteHabitTarget;
@@ -1060,7 +1028,8 @@
       // A 404 means the server already removed it, so local state can safely
       // converge to the same result instead of trapping the confirmation UI.
       if (!response.ok && response.status !== 404) {
-        throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
+        const detail = (await response.text()).trim();
+        throw new Error(detail || `Delete failed (${response.status})`);
       }
 
       board = {
@@ -1094,30 +1063,27 @@
     }
 
     clearingArchive = true;
-    archiveError = '';
     try {
+      let saved = board;
+      // Delete sequentially so each server response is based on the result of
+      // the previous deletion; this avoids racey stale board snapshots.
       for (const habit of archived) {
         const response = await fetch(`/api/boards/${credentials.boardId}/habits/${habit.id}`, {
           method: 'DELETE',
           headers: authHeaders(credentials)
         });
-        if (!response.ok && response.status !== 404) {
-          throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
-        }
+        if (!response.ok) throw new Error(await response.text());
+        saved = await response.json();
+        // Keep local state aligned even if a later deletion fails.
+        board = saved;
       }
-
-      const archivedIds = new Set(archived.map((habit) => habit.id));
-      board = {
-        ...board,
-        archivedHabits: [],
-        entries: (board.entries ?? []).filter((entry) => !archivedIds.has(entry.habitId))
-      };
       hydrateEntries(board);
       pendingHabitSave = null;
       persistLocalStateNow();
       panel = 'archived';
-      void fetchBoard(true).catch(() => {});
     } catch (error) {
+      hydrateEntries(board);
+      persistLocalStateNow();
       archiveError = error instanceof Error ? error.message : 'could not clear archive · retry';
     } finally {
       clearingArchive = false;
@@ -1150,79 +1116,27 @@
 
   function openRecovery() {
     recoveryInput = credentials ? `${credentials.boardId}.${credentials.secret}` : '';
-    restoreCodeInput = '';
-    recoveryError = '';
-    recoveryCopied = false;
-    recovering = false;
     panel = 'recovery';
   }
 
-  function parseRecoveryCode(raw: string): Credentials | null {
-    const token = raw.trim().replace(/^.*#/, '');
-    const separator = token.indexOf('.');
-    if (separator < 1) return null;
-    const boardId = token.slice(0, separator).trim();
-    const secret = token.slice(separator + 1).trim();
-    if (!boardId || secret.length < 20) return null;
-    return { boardId, secret };
-  }
-
   async function useRecoveryCode() {
-    if (recovering) return;
-    recoveryError = '';
-    const next = parseRecoveryCode(restoreCodeInput);
-    if (!next) {
-      recoveryError = 'Enter a complete recovery code.';
-      return;
-    }
-    if (!navigator.onLine) {
-      recoveryError = 'Connect to the internet to verify this code.';
-      return;
-    }
+    const token = recoveryInput.trim().replace(/^.*#/, '');
+    const separator = token.indexOf('.');
+    if (separator < 1) return;
+    const next = { boardId: token.slice(0, separator), secret: token.slice(separator + 1) };
+    if (!next.boardId || !next.secret) return;
 
-    recovering = true;
-    try {
-      // Validate first. Never replace this device's current credentials with an
-      // unverified code.
-      const response = await fetch(`/api/boards/${encodeURIComponent(next.boardId)}`, {
-        headers: authHeaders(next)
-      });
-      if (response.status === 401 || response.status === 404) {
-        recoveryError = 'That recovery code is not valid.';
-        return;
-      }
-      if (!response.ok) throw new Error(await response.text());
-
-      const recoveredBoard: Board = await response.json();
-
-      // Commit the board switch only after successful verification so a typo can
-      // never strand the device on invalid credentials or stale cached data.
-      credentials = next;
-      board = recoveredBoard;
-      setCredentials(next);
-      setCachedBoard(recoveredBoard);
-      setQueue([]);
-      pendingByCell.clear();
-      localTapValues.clear();
-      pendingHabitSave = null;
-      entries.clear();
-      hydrateEntries(recoveredBoard);
-      qrDataUrl = '';
-      pairingLink = '';
-      panel = 'none';
-      await tick();
-      await scrollToToday();
-    } catch {
-      recoveryError = 'Could not verify that code. Try again.';
-    } finally {
-      recovering = false;
-    }
-  }
-
-  async function copyRecoveryCode() {
-    await copyText(recoveryInput);
-    recoveryCopied = true;
-    setTimeout(() => (recoveryCopied = false), 1400);
+    setCredentials(next);
+    credentials = next;
+    board = null;
+    entries.clear();
+    qrDataUrl = '';
+    pairingLink = '';
+    pendingByCell.clear();
+    setQueue([]);
+    await fetchBoard(true);
+    panel = 'none';
+    await scrollToToday();
   }
 
   async function copyText(text: string) {
@@ -1551,12 +1465,7 @@
                         title="Archive"
                         onclick={() => archiveHabit(habitIndex)}
                       >
-                        <svg class="row-archive-icon" viewBox="0 0 16 16" aria-hidden="true">
-                          <path d="M4.25 5.25h7.5v7.25h-7.5z" />
-                          <path d="M5.25 3.25h5.5" />
-                          <path d="M8 7v3.25" />
-                          <path d="m6.5 8.75 1.5 1.5 1.5-1.5" />
-                        </svg>
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.75 4.75 6.5 6.5m0-6.5-6.5 6.5" /></svg>
                       </button>
                     </div>
                   </div>
@@ -1585,14 +1494,14 @@
                       class="cell"
                       disabled={!editable}
                       aria-label={prestart
-                        ? `${habit.name}, ${date.key}: before this habit existed`
+                        ? `${habit.name}, ${date.key}: before tracking began`
                         : `${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', locked'}`}
                       onpointerdown={(event) => {
                         if (event.button === 0) tapCell(habit.id, date.key, event.currentTarget);
                       }}
                       onclick={(event) => {
                         if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}>{prestart ? '·' : symbols[value]}</button>
+                      }}>{symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
@@ -1623,14 +1532,7 @@
                   aria-hidden="true"
                 ></td>
               {/if}
-              <td class="add-spacer" colspan={dates.length}>
-                <div class="state-legend" aria-label="Habit mark legend">
-                  <span><b>·</b> before</span>
-                  <span><b>-</b> missed</span>
-                  <span><b>|</b> done</span>
-                  <span><b>+</b> great</span>
-                </div>
-              </td>
+              <td class="add-spacer" colspan={dates.length}></td>
             </tr>
           </tbody>
         </table>
@@ -1656,90 +1558,50 @@
 {#if panel !== 'none'}
   <div class="backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (panel = 'none')}>
     <section class="panel" aria-modal="true" role="dialog">
-      <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
+      {#if panel !== 'archived'}
+        <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
+      {/if}
 
       {#if panel === 'pair'}
-        <div class="panel-heading">
-          <h2>add device</h2>
-          <p>Open 3tap on another device, then scan this code. Both devices will use the same board and stay in sync.</p>
-        </div>
-        {#if qrDataUrl}<img class="qr pair-qr" src={qrDataUrl} alt="QR code for pairing another device" />{/if}
-        <button class="panel-button panel-button-primary" onclick={copyPairingLink}>
-          {pairingCopied ? 'link copied' : 'copy pairing link'}
-        </button>
-        <p class="privacy-note">Keep this link private. Anyone with it can open this board.</p>
+        <h2>add device</h2>
+        <p>scan this on the other device.</p>
+        {#if qrDataUrl}<img class="qr" src={qrDataUrl} alt="Pairing QR code" />{/if}
+        <button class="action" onclick={() => copyText(pairingLink)}>copy sync link</button>
       {:else if panel === 'recovery'}
-        <div class="panel-heading">
-          <h2>recovery</h2>
-          <p>Your recovery code is a private backup key for this board.</p>
-        </div>
-
-        <div class="recovery-section">
-          <div class="panel-label">this board</div>
-          <p class="section-help">Save this somewhere private. You can use it to restore this board on another device.</p>
-          <div class="code-box">
-            <code>{recoveryInput}</code>
-          </div>
-          <button class="panel-button" onclick={copyRecoveryCode}>{recoveryCopied ? 'copied' : 'copy recovery code'}</button>
-        </div>
-
-        <div class="panel-divider"></div>
-
-        <div class="recovery-section">
-          <label class="panel-label" for="restore-code">open another board</label>
-          <p class="section-help">Paste another board's recovery code. This changes only the board stored on this device.</p>
-          <textarea
-            id="restore-code"
-            class="restore-code-input"
-            bind:value={restoreCodeInput}
-            rows="2"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="paste recovery code"
-            oninput={() => (recoveryError = '')}
-          ></textarea>
-          {#if recoveryError}<p class="recovery-error" role="alert">{recoveryError}</p>{/if}
-          <button class="panel-button panel-button-primary" disabled={recovering || !restoreCodeInput.trim()} onclick={useRecoveryCode}>
-            {recovering ? 'checking…' : 'open board'}
-          </button>
+        <h2>recovery</h2>
+        <p>save this code somewhere private. anyone with it can open this board.</p>
+        <textarea bind:value={recoveryInput} rows="4" spellcheck="false"></textarea>
+        <div class="panel-actions">
+          <button class="text-button" onclick={() => copyText(recoveryInput)}>copy</button>
+          <button class="action" onclick={useRecoveryCode}>use code</button>
         </div>
       {:else if panel === 'archived'}
-        <div class="panel-heading">
+        <div class="archive-heading">
           <h2>archive</h2>
-          <p>Archived habits keep their history. Restore one anytime, or delete it permanently.</p>
+          <div class="archive-heading-actions">
+            {#if (board?.archivedHabits?.length ?? 0) > 0}
+              <button class="archive-button archive-button-danger clear-all-button" onclick={confirmClearArchive}>clear all</button>
+            {/if}
+            <button class="archive-close" aria-label="Close archive" title="Close" onclick={() => (panel = 'none')}>×</button>
+          </div>
         </div>
-
         {#if (board?.archivedHabits?.length ?? 0) === 0}
-          <div class="archive-empty-state">
-            <div class="panel-label">archived habits</div>
-            <p class="section-help">Nothing is archived right now.</p>
-          </div>
+          <p class="archive-empty">no archived habits.</p>
         {:else}
-          <div class="archive-section">
-            <div class="panel-label">archived habits</div>
-            <div class="archived-list">
-              {#each board?.archivedHabits ?? [] as habit (habit.id)}
-                {@const historyDays = archivedHistoryDays(habit)}
-                <div class="archived-item">
-                  <div class="archived-copy">
-                    <strong>{habit.name}</strong>
-                    <span>history: {historyDays} {historyDays === 1 ? 'day' : 'days'}</span>
-                  </div>
-                  <div class="archived-actions">
-                    <button class="panel-button" onclick={() => restoreArchivedHabit(habit, habit.position)}>restore</button>
-                    <button class="panel-button panel-button-danger" onclick={() => confirmPermanentDelete(habit)}>delete</button>
-                  </div>
+          <div class="archived-list">
+            {#each board?.archivedHabits ?? [] as habit (habit.id)}
+              {@const historyDays = archivedHistoryDays(habit)}
+              <div class="archived-item">
+                <div class="archived-copy">
+                  <strong>{habit.name}</strong>
+                  <span>history: {historyDays} {historyDays === 1 ? 'day' : 'days'}</span>
                 </div>
-              {/each}
-            </div>
-          </div>
-
-          <div class="panel-divider"></div>
-
-          <div class="archive-danger-section">
-            <div class="panel-label">clear archive</div>
-            <p class="section-help">Permanently delete every archived habit and all of their history.</p>
-            <button class="panel-button panel-button-danger" onclick={confirmClearArchive}>clear all</button>
+                <div class="archived-actions">
+                  <button class="archive-button" onclick={() => restoreArchivedHabit(habit, habit.position)}>restore</button>
+                  <button class="archive-button archive-button-danger" onclick={() => confirmPermanentDelete(habit)}>delete</button>
+                </div>
+              </div>
+            {/each}
           </div>
         {/if}
       {:else if panel === 'delete' && deleteHabitTarget}
@@ -1747,9 +1609,9 @@
         <h2>delete {deleteHabitTarget.name}?</h2>
         <p>permanently delete this habit and its {historyDays} {historyDays === 1 ? 'day' : 'days'} of history?</p>
         {#if archiveError}<p class="archive-error" role="alert">{archiveError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={deletingHabit} onclick={deleteHabitForever}>
+        <div class="archive-confirm-actions">
+          <button class="archive-button" onclick={() => (panel = 'archived')}>cancel</button>
+          <button class="archive-button archive-button-danger" disabled={deletingHabit} onclick={deleteHabitForever}>
             {deletingHabit ? 'deleting…' : 'delete'}
           </button>
         </div>
@@ -1757,9 +1619,9 @@
         <h2>clear archive?</h2>
         <p>permanently delete all {board?.archivedHabits?.length ?? 0} archived habits and their history?</p>
         {#if archiveError}<p class="archive-error" role="alert">{archiveError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={clearingArchive} onclick={clearArchive}>
+        <div class="archive-confirm-actions">
+          <button class="archive-button" onclick={() => (panel = 'archived')}>cancel</button>
+          <button class="archive-button archive-button-danger" disabled={clearingArchive} onclick={clearArchive}>
             {clearingArchive ? 'clearing…' : 'clear all'}
           </button>
         </div>
@@ -1791,20 +1653,18 @@
     --border: #d3d3cd;
     --panel-border: #cecec8;
     --hover: #e7e7e1;
-    --timeline-text: #62635d;
-    --timeline-mark: #555650;
-    --today-accent: #2f70b7;
-    --today-fill: rgba(47,112,183,.10);
+    --today-fill: rgba(17,17,15,.085);
+    --prestart-fill: rgba(17,17,15,.018);
     --press-fill: rgba(17,17,15,.13);
     --selection-bg: #b8d7ff;
     --selection-text: #0b1b2b;
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
-    --icon-device: #4d7fa8;
-    --icon-device-hover: #3e7099;
-    --icon-archive: #c96f45;
-    --icon-archive-hover: #c96f45;
+    --icon-device: #2f9164;
+    --icon-device-hover: #237a52;
+    --icon-archive: #c95b5b;
+    --icon-archive-hover: #b44747;
     --icon-recovery: #805bb5;
     --icon-recovery-hover: #6f49a5;
     --icon-theme: #b18a22;
@@ -1825,20 +1685,18 @@
     --border: #40413c;
     --panel-border: #4a4b45;
     --hover: #252620;
-    --timeline-text: #a9aaa3;
-    --timeline-mark: #b5b6af;
-    --today-accent: #79aef2;
-    --today-fill: rgba(121,174,242,.12);
+    --today-fill: rgba(255,255,248,.115);
+    --prestart-fill: rgba(255,255,248,.028);
     --press-fill: rgba(255,255,248,.16);
     --selection-bg: #315f8f;
     --selection-text: #ffffff;
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
-    --icon-device: #79a5c8;
-    --icon-device-hover: #91b8d7;
-    --icon-archive: #dd8757;
-    --icon-archive-hover: #dd8757;
+    --icon-device: #63bd8a;
+    --icon-device-hover: #7bcea0;
+    --icon-archive: #df7676;
+    --icon-archive-hover: #ee8c8c;
     --icon-recovery: #ad83d7;
     --icon-recovery-hover: #c09be2;
     --icon-theme: #d7ba58;
@@ -2034,13 +1892,13 @@
     border-bottom-color: var(--control-active);
   }
   @media (hover: hover) and (pointer: fine) {
-    .tool-icon:hover::before {
-      border-color: var(--grid-strong);
-      background: var(--hover);
-    }
-    .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid-strong); }
-    .panel-button-danger:not(:disabled):hover { color: var(--danger); }
-    .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
+    .device-tool:hover { color: var(--icon-device-hover); }
+    .archive-tool:hover { color: var(--icon-archive-hover); }
+    .recovery-tool:hover { color: var(--icon-recovery-hover); }
+    .theme-toggle:hover { color: var(--icon-theme-hover); }
+    .archive-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid-strong); }
+    .archive-button-danger:not(:disabled):hover { color: var(--danger); }
+    .archive-close:hover, .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
     .month-button:hover,
     .year-button:hover,
     .nav-today:hover {
@@ -2117,28 +1975,15 @@
     opacity: 1;
     background: transparent;
     -webkit-tap-highlight-color: transparent;
-    transition: transform 110ms ease;
-  }
-  .tool-icon::before {
-    content: '';
-    position: absolute;
-    width: 36px;
-    height: 36px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: transparent;
-    pointer-events: none;
-    transition: border-color 110ms ease, background-color 110ms ease;
+    transition: color 110ms ease, transform 110ms ease;
   }
   .device-tool { color: var(--icon-device); }
   .archive-tool { color: var(--icon-archive); }
   .recovery-tool { color: var(--icon-recovery); }
   .theme-toggle { color: var(--icon-theme); }
   .tool-icon svg {
-    position: relative;
-    z-index: 1;
-    width: 24px;
-    height: 24px;
+    width: 20px;
+    height: 20px;
     overflow: visible;
     fill: none;
     stroke: currentColor;
@@ -2148,8 +1993,9 @@
     pointer-events: none;
   }
   .tool-icon .icon-fill { fill: currentColor; }
+  .tool-icon .icon-fill-soft { fill: currentColor; fill-opacity: .18; }
   .tool-icon .icon-cutout { fill: var(--bg); }
-  .tool-icon .key-icon { width: 26px; height: 26px; }
+  .tool-icon .key-icon { width: 19px; height: 19px; }
   .tool-icon:active { transform: scale(.92); }
 
   .day-head-strip {
@@ -2178,18 +2024,16 @@
   .day-head span,
   .day-head strong {
     display: block;
-    color: var(--timeline-text);
     font-weight: 400;
     line-height: 1.15;
-    opacity: 1;
+    opacity: .62;
   }
   .day-head strong { font-size: 11px; }
   .day-head.today { background: var(--today-fill); }
   .day-head.today span,
-  .day-head.today strong {
-    color: var(--today-accent);
-    opacity: 1;
-  }
+  .day-head.today strong { opacity: .96; }
+  .day-head.prestart span,
+  .day-head.prestart strong { opacity: .34; }
   table {
     border-collapse: separate;
     border-spacing: 0;
@@ -2310,11 +2154,6 @@
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .habit-controls .row-archive-icon {
-    width: 17px;
-    height: 17px;
-    stroke-width: 1.45;
-  }
   .habit-controls .delete-habit { color: var(--control-text); }
   .habit-controls button:disabled { opacity: .22; cursor: default; }
   .habit-name {
@@ -2365,29 +2204,6 @@
     border: 0;
     background: transparent;
   }
-  .state-legend {
-    height: var(--day-size);
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 14px;
-    padding-right: var(--page-inset);
-    color: var(--muted);
-    font-size: 9px;
-    white-space: nowrap;
-    opacity: .62;
-    pointer-events: none;
-  }
-  .state-legend span {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-  }
-  .state-legend b {
-    color: var(--timeline-mark);
-    font-size: 11px;
-    font-weight: 500;
-  }
   .add-habit {
     width: 100%;
     height: 100%;
@@ -2398,158 +2214,88 @@
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: var(--today-fill); }
-  /* Every non-today timeline column uses the same color treatment. */
+  /* Tracking start keeps the same 1px grid color as every other boundary. */
   tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
-  td.prestart { background: transparent; }
-  td.locked .cell,
+  td.prestart { background: var(--prestart-fill); }
+  td.locked .cell { cursor: default; }
   td.prestart .cell { cursor: default; }
   .cell {
     width: 100%;
     height: 100%;
-    color: var(--timeline-mark);
     font-size: 16px;
     font-weight: 400;
-    opacity: .78;
     touch-action: manipulation;
     user-select: none;
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
   }
-  td.prestart .cell {
-    font-size: 18px;
-    line-height: 1;
-  }
   .cell.plus { font-weight: 750; font-size: 17px; }
-  .cell:disabled { pointer-events: none; }
-  td.today .cell {
-    color: var(--today-accent);
-    opacity: 1;
-  }
+  .cell:disabled { color: inherit; pointer-events: none; }
+  td.locked .cell { opacity: .66; }
+  td.prestart .cell { opacity: .34; }
+  td.today .cell { opacity: 1; }
+  td:not(.locked):not(.prestart) .cell[aria-label$=': -'] { opacity: .52; }
   .cell:not(:disabled):active { background: var(--press-fill); }
 
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
   .panel { position: relative; width: min(420px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 22px; scrollbar-width: none; }
   .panel::-webkit-scrollbar { display: none; }
   .panel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: lowercase; }
-  .panel p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+  .panel p { margin: 0 0 18px; color: var(--muted); font-size: 11px; line-height: 1.5; }
   .close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; display: grid; place-items: center; font-size: 18px; opacity: .68; }
-  .panel-heading { padding-right: 34px; margin-bottom: 18px; }
-  .panel-heading h2 { margin-bottom: 7px; }
-  .panel-label {
-    display: block;
-    margin-bottom: 5px;
-    color: var(--text);
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: lowercase;
-  }
-  .section-help { margin-bottom: 10px !important; }
-  .panel-divider { height: 1px; margin: 20px 0; background: var(--border); }
-  .panel-button {
+  .qr { display: block; width: min(280px, 100%); margin: 16px auto 20px; image-rendering: pixelated; }
+  .action { border: 1px solid var(--text); padding: 9px 12px; font-size: 11px; }
+  .text-button { font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+  textarea { resize: vertical; padding: 9px; font-size: 10px; line-height: 1.4; margin-bottom: 14px; }
+  .panel-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
+  .archive-heading {
     min-height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 8px;
+  }
+  .archive-heading h2 { margin: 0; }
+  .archive-heading-actions { display: flex; align-items: center; gap: 8px; }
+  .archive-close {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border: 1px solid transparent;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1;
+    transition: color 100ms ease, background 100ms ease, border-color 100ms ease;
+  }
+  .archive-empty { margin-top: 8px !important; }
+  .archived-list { display: grid; gap: 0; margin-top: 8px; border-top: 1px solid var(--border); }
+  .archived-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 58px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .archived-copy { min-width: 0; display: grid; gap: 4px; }
+  .archived-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+  .archived-copy span { color: var(--muted); font-size: 10px; }
+  .archived-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+  .archive-button {
+    min-height: 30px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 0 10px;
+    padding: 0 8px;
     border: 1px solid var(--border);
-    background: transparent;
     color: var(--text);
+    background: transparent;
     font-size: 10px;
     line-height: 1;
+    text-decoration: none;
     transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
   }
-  .panel-button-primary { border-color: var(--grid-strong); }
-  .panel-button:disabled { opacity: .38; cursor: default; }
-  .panel-button:not(:disabled):active { background: var(--press-fill); }
-  .qr { display: block; width: min(250px, 76vw); margin: 10px auto 18px; image-rendering: pixelated; }
-  .pair-qr { border: 1px solid var(--border); }
-  .privacy-note { margin-top: 10px !important; font-size: 10px !important; }
-  .recovery-section { display: grid; justify-items: start; }
-  .code-box {
-    width: 100%;
-    min-height: 54px;
-    display: flex;
-    align-items: center;
-    margin-bottom: 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .code-box code {
-    min-width: 0;
-    color: var(--control-text);
-    font: inherit;
-    font-size: 10px;
-    line-height: 1.45;
-    overflow-wrap: anywhere;
-    user-select: all;
-  }
-  .restore-code-input {
-    width: 100%;
-    min-height: 54px;
-    resize: none;
-    margin: 0 0 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--border);
-    border-radius: 0;
-    outline: none;
-    background: var(--surface);
-    color: var(--text);
-    font-size: 10px;
-    line-height: 1.45;
-  }
-  .restore-code-input::placeholder { color: var(--muted); opacity: .7; }
-  .restore-code-input:focus { border-color: var(--grid-strong); }
-  .recovery-error { margin: 0 0 8px !important; color: var(--danger) !important; font-size: 10px !important; }
-  .archive-section,
-  .archive-empty-state,
-  .archive-danger-section {
-    display: grid;
-    justify-items: start;
-  }
-  .archive-empty-state { padding-top: 2px; }
-  .archived-list {
-    width: 100%;
-    display: grid;
-    margin-top: 2px;
-  }
-  .archived-item {
-    min-width: 0;
-    display: grid;
-    gap: 9px;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .archived-item:first-child { border-top: 1px solid var(--border); }
-  .archived-copy {
-    min-width: 0;
-    display: grid;
-    gap: 3px;
-  }
-  .archived-copy strong {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .archived-copy span { color: var(--muted); font-size: 10px; }
-  .archived-actions {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .panel-button-danger { color: var(--danger); }
+  .archive-button-danger { color: var(--danger); }
+  .archive-button:disabled { opacity: .42; cursor: default; }
+  .archive-button:not(:disabled):active { background: var(--press-fill); }
+  .clear-all-button { min-height: 30px; padding-inline: 8px; }
   .archive-error { margin: -6px 0 14px !important; color: var(--danger) !important; }
-  .panel-confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 18px;
-  }
+  .archive-confirm-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 18px; }
   .archive-toast {
     position: fixed;
     z-index: 120;
