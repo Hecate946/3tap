@@ -24,7 +24,10 @@ export async function POST() {
     created_at: now,
     updated_at: now
   });
-  if (boardError) throw error(500, boardError.message);
+  if (boardError) {
+    console.error('3tap create board failed', { code: boardError.code, message: boardError.message });
+    throw error(500, boardError.message);
+  }
 
   const habits = DEFAULT_HABITS.map((name, position) => ({
     id: randomUUID(),
@@ -34,7 +37,10 @@ export async function POST() {
   }));
 
   const { error: habitsError } = await db.from('habits').insert(habits);
-  if (habitsError) throw error(500, habitsError.message);
+  if (habitsError) {
+    console.error('3tap create habits failed', { code: habitsError.code, message: habitsError.message });
+    throw error(500, habitsError.message);
+  }
 
   return json({
     credentials: { boardId, secret },

@@ -4,10 +4,7 @@ import { env as svelteEnv } from '$env/dynamic/private';
 import { error, type RequestEvent } from '@sveltejs/kit';
 
 function serverEnv(name: 'SUPABASE_URL' | 'SUPABASE_SERVICE_ROLE_KEY') {
-  // Cloudflare Workers exposes runtime Variables/Secrets through process.env when
-  // nodejs_compat is enabled. SvelteKit's dynamic private env remains the local
-  // development fallback.
-  const value = process.env[name] || svelteEnv[name];
+  const value = (process.env[name] || svelteEnv[name] || '').trim();
   if (!value) {
     throw new Error(
       `${name} is missing at runtime. Add it to Cloudflare Worker > Settings > Variables and Secrets.`
@@ -21,12 +18,13 @@ let client: SupabaseClient | null = null;
 function getDb() {
   if (!client) {
     client = createClient(
-      serverEnv('SUPABASE_URL'),
+      serverEnv('SUPABASE_URL').replace(/\/$/, ''),
       serverEnv('SUPABASE_SERVICE_ROLE_KEY'),
       {
         auth: {
           persistSession: false,
-          autoRefreshToken: false
+          autoRefreshToken: false,
+          detectSessionInUrl: false
         }
       }
     );
@@ -34,8 +32,6 @@ function getDb() {
   return client;
 }
 
-// Keep the existing db.from(...) API while creating the client lazily on the
-// first request. This avoids failing the entire Worker module during startup.
 export const db = new Proxy({} as SupabaseClient, {
   get(_target, property) {
     const database = getDb() as unknown as Record<PropertyKey, unknown>;
