@@ -34,7 +34,7 @@
   let online = true;
   let theme: 'light' | 'dark' = 'light';
   let navScrolled = false;
-  let panel: 'none' | 'pair' | 'recovery' | 'archived' | 'delete' | 'clear' = 'none';
+  let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
   let recoveryInput = '';
@@ -43,6 +43,8 @@
   let recovering = false;
   let recoveryCopied = false;
   let pairingCopied = false;
+  let deletingBoard = false;
+  let deleteBoardError = '';
   let archiveToast: { habit: Habit; index: number } | null = null;
   let archiveToastTimer: ReturnType<typeof setTimeout> | undefined;
   let deleteHabitTarget: Habit | null = null;
@@ -317,7 +319,22 @@
     const response = await fetch(`/api/boards/${credentials.boardId}`, { headers });
     if (response.status === 304) return;
     if (!response.ok) {
-      if (response.status === 401 || response.status === 404) return;
+      if (response.status === 404) {
+        // A board deleted from another paired device should not leave this
+        // device stranded on a stale local copy. Start a fresh blank board.
+        clearLocalBoard();
+        credentials = null;
+        board = null;
+        pendingByCell.clear();
+        localTapValues.clear();
+        pendingHabitSave = null;
+        entries.clear();
+        await createBoard();
+        await tick();
+        await scrollToToday();
+        return;
+      }
+      if (response.status === 401) return;
       throw new Error(await response.text());
     }
 
@@ -676,10 +693,16 @@
     }
   }
 
-  async function openPair() {
+  async function openAccess() {
     if (!credentials) return;
     pairingCopied = false;
-    panel = 'pair';
+    recoveryInput = `${credentials.boardId}.${credentials.secret}`;
+    restoreCodeInput = '';
+    recoveryError = '';
+    recoveryCopied = false;
+    recovering = false;
+    deleteBoardError = '';
+    panel = 'access';
 
     // Give the new device the freshest server state we can before pairing.
     // The pairing link itself remains usable even if a background sync fails.
@@ -1149,15 +1172,6 @@
     newHabitName = '';
   }
 
-  function openRecovery() {
-    recoveryInput = credentials ? `${credentials.boardId}.${credentials.secret}` : '';
-    restoreCodeInput = '';
-    recoveryError = '';
-    recoveryCopied = false;
-    recovering = false;
-    panel = 'recovery';
-  }
-
   function parseRecoveryCode(raw: string): Credentials | null {
     const token = raw.trim().replace(/^.*#/, '');
     const separator = token.indexOf('.');
@@ -1228,6 +1242,47 @@
 
   async function copyText(text: string) {
     await navigator.clipboard.writeText(text);
+  }
+
+  function confirmDeleteBoard() {
+    deleteBoardError = '';
+    panel = 'delete-board';
+  }
+
+  async function deleteBoardForever() {
+    if (!credentials || deletingBoard) return;
+    deletingBoard = true;
+    deleteBoardError = '';
+
+    try {
+      const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}`, {
+        method: 'DELETE',
+        headers: authHeaders(credentials)
+      });
+      if (!response.ok) {
+        const raw = await response.text();
+        let message = raw;
+        try {
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.message === 'string') message = parsed.message;
+        } catch {}
+        throw new Error(message || 'Could not delete this board.');
+      }
+
+      // Remove every local reference before reloading. The normal bootstrap
+      // will create a new empty anonymous board on this device.
+      clearLocalBoard();
+      pendingByCell.clear();
+      localTapValues.clear();
+      pendingHabitSave = null;
+      entries.clear();
+      location.reload();
+    } catch (error) {
+      deleteBoardError = error instanceof Error && error.message
+        ? error.message
+        : 'Could not delete this board. Try again.';
+      deletingBoard = false;
+    }
   }
 
 
@@ -1435,7 +1490,7 @@
           <div class="timeline-header" aria-label="Timeline">
             <div class="timeline-side">
               <nav class="timeline-controls" aria-label="App controls">
-                <button class="tool-icon device-tool" aria-label="Add device" title="Add device" onclick={openPair}>
+                <button class="tool-icon device-tool" aria-label="Access and devices" title="Access" onclick={openAccess}>
                   <!-- Lucide-inspired filled Smartphone -->
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <rect x="5" y="2" width="14" height="20" rx="2.25" class="icon-fill" stroke="none"></rect>
@@ -1449,13 +1504,6 @@
                     <rect x="3" y="7" width="18" height="14" rx="2" class="icon-fill" stroke="none"></rect>
                     <rect x="2" y="3" width="20" height="5" rx="1.5" class="icon-fill" stroke="none"></rect>
                     <rect x="9" y="11" width="6" height="2" rx="1" class="icon-cutout" stroke="none"></rect>
-                  </svg>
-                </button>
-                <button class="tool-icon recovery-tool" aria-label="Recovery" title="Recovery" onclick={openRecovery}>
-                  <!-- Lucide: KeyRound, optically inset so the stroke never clips -->
-                  <svg class="key-icon" viewBox="-1 -1 26 26" aria-hidden="true">
-                    <path d="M3.5 18.5 10 12a6 6 0 1 1 2 2l-2 2H7v3H4v3H2v-3.5a2 2 0 0 1 .6-1.4z"></path>
-                    <circle cx="16.5" cy="7.5" r="1.25" class="icon-fill" stroke="none"></circle>
                   </svg>
                 </button>
                 <button
@@ -1507,6 +1555,28 @@
               {/each}
             </div>
           </div>
+          {#if board.habits.length === 0}
+            <div class="zero-add-row">
+              <div class="zero-add-cell">
+                {#if addingHabit}
+                  <input
+                    class="habit-inline-input add-input"
+                    bind:this={newHabitInput}
+                    bind:value={newHabitName}
+                    placeholder="habit"
+                    aria-label="New habit"
+                    onblur={commitAddHabit}
+                    onkeydown={(event) => {
+                      if (event.key === 'Enter') event.currentTarget.blur();
+                      if (event.key === 'Escape') cancelAddHabit();
+                    }}
+                  />
+                {:else}
+                  <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
+                {/if}
+              </div>
+            </div>
+          {:else}
           <table>
             <tbody>
             {#each board.habits as habit, habitIndex (habit.id)}
@@ -1629,8 +1699,21 @@
             </tr>
           </tbody>
         </table>
+          {/if}
         </div>
       </div>
+      {#if board.habits.length === 0}
+        <section class="zero-tutorial" aria-label="Getting started">
+          <strong>add a habit to start tracking</strong>
+          <span>tap today to cycle between</span>
+          <div class="zero-state-key" aria-label="Habit states">
+            <span><b>-</b> missed</span>
+            <span><b>|</b> done</span>
+            <span><b>+</b> great</span>
+          </div>
+          <span>past days stay locked</span>
+        </section>
+      {/if}
     </main>
   {:else}
     <main aria-busy={loading}></main>
@@ -1653,36 +1736,38 @@
     <section class="panel" aria-modal="true" role="dialog">
       <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
 
-      {#if panel === 'pair'}
+      {#if panel === 'access'}
         <div class="panel-heading">
-          <h2>add device</h2>
-          <p>Open 3tap on another device, then scan this code. Both devices will use the same board and stay in sync.</p>
-        </div>
-        {#if qrDataUrl}<img class="qr pair-qr" src={qrDataUrl} alt="QR code for pairing another device" />{/if}
-        <button class="panel-button panel-button-primary" onclick={copyPairingLink}>
-          {pairingCopied ? 'link copied' : 'copy pairing link'}
-        </button>
-        <p class="privacy-note">Keep this link private. Anyone with it can open this board.</p>
-      {:else if panel === 'recovery'}
-        <div class="panel-heading">
-          <h2>recovery</h2>
-          <p>Your recovery code is a private backup key for this board.</p>
+          <h2>access</h2>
+          <p>Take this board with you, keep a backup, or open another one.</p>
         </div>
 
-        <div class="recovery-section">
-          <div class="panel-label">this board</div>
-          <p class="section-help">Save this somewhere private. You can use it to restore this board on another device.</p>
-          <div class="code-box">
-            <code>{recoveryInput}</code>
-          </div>
-          <button class="panel-button" onclick={copyRecoveryCode}>{recoveryCopied ? 'copied' : 'copy recovery code'}</button>
+        <div class="access-section">
+          <div class="panel-label">add device</div>
+          <p class="section-help">Scan this on another device to bring this board with you. Both devices stay in sync.</p>
+          {#if qrDataUrl}<img class="qr pair-qr" src={qrDataUrl} alt="QR code for pairing another device" />{/if}
+          <button class="panel-button panel-button-primary" disabled={!pairingLink} onclick={copyPairingLink}>
+            {pairingCopied ? 'link copied' : pairingLink ? 'copy pairing link' : 'preparing…'}
+          </button>
+          <p class="privacy-note">Treat the QR like a key — anyone with it can open this board.</p>
         </div>
 
         <div class="panel-divider"></div>
 
-        <div class="recovery-section">
-          <label class="panel-label" for="restore-code">open another board</label>
-          <p class="section-help">Paste another board's recovery code. This changes only the board stored on this device.</p>
+        <div class="access-section">
+          <div class="panel-label">your backup key</div>
+          <p class="section-help">Keep this somewhere safe. If you lose every device, this little key brings your board back.</p>
+          <div class="code-box">
+            <code>{recoveryInput}</code>
+          </div>
+          <button class="panel-button" onclick={copyRecoveryCode}>{recoveryCopied ? 'copied ✓' : 'copy key'}</button>
+        </div>
+
+        <div class="panel-divider"></div>
+
+        <div class="access-section">
+          <label class="panel-label" for="restore-code">have another key?</label>
+          <p class="section-help">Paste a backup key from another board. Only this device will switch.</p>
           <textarea
             id="restore-code"
             class="restore-code-input"
@@ -1690,13 +1775,21 @@
             rows="2"
             spellcheck="false"
             autocomplete="off"
-            placeholder="paste recovery code"
+            placeholder="paste backup key"
             oninput={() => (recoveryError = '')}
           ></textarea>
           {#if recoveryError}<p class="recovery-error" role="alert">{recoveryError}</p>{/if}
           <button class="panel-button panel-button-primary" disabled={recovering || !restoreCodeInput.trim()} onclick={useRecoveryCode}>
             {recovering ? 'checking…' : 'open board'}
           </button>
+        </div>
+
+        <div class="panel-divider"></div>
+
+        <div class="access-section access-danger-section">
+          <div class="panel-label">delete board</div>
+          <p class="section-help">Permanently delete this board, every habit, and all history from 3tap.</p>
+          <button class="panel-button panel-button-danger" onclick={confirmDeleteBoard}>delete board</button>
         </div>
       {:else if panel === 'archived'}
         <div class="panel-heading">
@@ -1756,6 +1849,16 @@
           <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
           <button class="panel-button panel-button-danger" disabled={clearingArchive} onclick={clearArchive}>
             {clearingArchive ? 'clearing…' : 'clear all'}
+          </button>
+        </div>
+      {:else if panel === 'delete-board'}
+        <h2>delete this board?</h2>
+        <p>This permanently deletes every habit and all history on every paired device. This device will start with a new empty board.</p>
+        {#if deleteBoardError}<p class="archive-error" role="alert">{deleteBoardError}</p>{/if}
+        <div class="panel-confirm-actions">
+          <button class="panel-button" onclick={() => (panel = 'access')}>cancel</button>
+          <button class="panel-button panel-button-danger" disabled={deletingBoard} onclick={deleteBoardForever}>
+            {deletingBoard ? 'deleting…' : 'delete board'}
           </button>
         </div>
       {/if}
@@ -2100,7 +2203,7 @@
     width: 100%;
     height: var(--day-size);
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     align-items: stretch;
   }
   .tool-icon {
@@ -2127,7 +2230,6 @@
   }
   .device-tool { color: var(--icon-device); }
   .archive-tool { color: var(--icon-archive); }
-  .recovery-tool { color: var(--icon-recovery); }
   .theme-toggle { color: var(--icon-theme); }
   .tool-icon svg {
     position: relative;
@@ -2144,7 +2246,6 @@
   }
   .tool-icon .icon-fill { fill: currentColor; }
   .tool-icon .icon-cutout { fill: var(--bg); }
-  .tool-icon .key-icon { width: 26px; height: 26px; }
   .tool-icon:active { transform: scale(.92); }
 
   .day-head-strip {
@@ -2348,6 +2449,59 @@
     padding: 0;
     font-size: 12px;
   }
+  .zero-add-row {
+    width: 100%;
+    height: var(--day-size);
+  }
+  .zero-add-cell {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    width: var(--habit-width);
+    min-width: var(--habit-width);
+    max-width: var(--habit-width);
+    height: var(--day-size);
+    padding: 0 8px 0 var(--page-inset);
+    display: flex;
+    align-items: center;
+    background: var(--bg);
+  }
+  .zero-tutorial {
+    width: min(420px, calc(100% - (var(--page-inset) * 2)));
+    margin: 28px auto 0;
+    display: grid;
+    justify-items: center;
+    gap: 7px;
+    padding: 8px 0 24px;
+    color: var(--muted);
+    text-align: center;
+    font-size: 10px;
+    line-height: 1.45;
+  }
+  .zero-tutorial strong {
+    margin-bottom: 2px;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .zero-state-key {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 16px;
+    min-height: 18px;
+  }
+  .zero-state-key span {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .zero-tutorial b {
+    color: var(--timeline-mark);
+    font: inherit;
+    font-weight: 600;
+  }
   .add-habit-cell {
     height: var(--day-size);
     border: 0;
@@ -2464,7 +2618,8 @@
   .qr { display: block; width: min(250px, 76vw); margin: 10px auto 18px; image-rendering: pixelated; }
   .pair-qr { border: 1px solid var(--border); }
   .privacy-note { margin-top: 10px !important; font-size: 10px !important; }
-  .recovery-section { display: grid; justify-items: start; }
+  .access-section { display: grid; justify-items: start; }
+  .access-danger-section { padding-bottom: 1px; }
   .code-box {
     width: 100%;
     min-height: 54px;

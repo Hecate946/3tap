@@ -1,10 +1,11 @@
-3tap clean-slate + palette patch
+3tap recovery + zero-state polish
 
 Changes:
-- Today accent is more turquoise in light and dark mode.
-- Dark mode uses a cooler charcoal palette instead of the prior brown/olive cast.
-- New boards start with zero habits; all starter habits were removed from board creation.
-- Includes a one-time production migration that permanently deletes ALL existing boards, habits, and entries.
-- Includes a matching one-time browser cache reset so deleted starter boards do not remain visible from localStorage.
+- Moves the zero-state tutorial completely outside the horizontally draggable timeline.
+- Centers and aligns the tutorial more cleanly.
+- Makes Access/recovery language friendlier and easier to understand.
+- Renames recovery-code copy to a simpler "backup key" concept without changing the underlying key format or security.
 
-IMPORTANT: 20260823095000_clean_slate_reset.sql is intentionally destructive and runs once through the normal Supabase migration pipeline.
+Apply from the 3tap project root:
+  unzip -o ~/Downloads/3tap-cuter-recovery-zero-tutorial-patch.zip
+  npm run dev
