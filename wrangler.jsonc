@@ -4,6 +4,16 @@
   "main": ".svelte-kit/cloudflare/_worker.js",
   "compatibility_date": "2026-08-22",
   "compatibility_flags": ["nodejs_compat"],
+
+  // Keep dashboard-defined variables/secrets instead of removing them on deploy.
+  "keep_vars": true,
+
+  // Supabase project URL is public/non-secret, so keep it in source control.
+  // This guarantees every Wrangler deploy receives the correct runtime URL.
+  "vars": {
+    "SUPABASE_URL": "https://zxglxdnbkxlghssjppjh.supabase.co"
+  },
+
   "assets": {
     "directory": ".svelte-kit/cloudflare",
     "binding": "ASSETS"
