@@ -6,6 +6,7 @@
   import type { Board, Credentials, Entry, Habit, MarkValue } from '$lib/types';
   import {
     authHeaders,
+    clearLocalBoard,
     compactQueue,
     getCachedBoard,
     getCredentials,
@@ -17,6 +18,15 @@
   } from '$lib/client';
 
   type DayColumn = { key: string; weekday: string; day: number; month: string; year: number };
+
+  // One-time 2026-08-23 clean-slate reset. This mirrors the production DB
+  // reset migration so stale anonymous-board credentials/habits cannot survive
+  // in a returning browser after their server-side board has been removed.
+  const CLIENT_RESET_VERSION = '2026-08-23-clean-slate-v1';
+  if (browser && localStorage.getItem('3tap.client-reset') !== CLIENT_RESET_VERSION) {
+    clearLocalBoard();
+    localStorage.setItem('3tap.client-reset', CLIENT_RESET_VERSION);
+  }
 
   let board: Board | null = browser ? getCachedBoard() : null;
   let credentials: Credentials | null = browser ? getCredentials() : null;
@@ -1240,7 +1250,7 @@
     localStorage.setItem('3tap.theme', next);
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
       'content',
-      next === 'dark' ? '#111210' : '#f7f7f5'
+      next === 'dark' ? '#0e1112' : '#f7f7f5'
     );
   }
 
@@ -1778,8 +1788,8 @@
     --hover: #e7e7e1;
     --timeline-text: #62635d;
     --timeline-mark: #555650;
-    --today-accent: #2f70b7;
-    --today-fill: rgba(47,112,183,.10);
+    --today-accent: #168b92;
+    --today-fill: rgba(22,139,146,.11);
     --press-fill: rgba(17,17,15,.13);
     --selection-bg: #b8d7ff;
     --selection-text: #0b1b2b;
@@ -1799,21 +1809,21 @@
     color-scheme: light;
   }
   :global(html[data-theme='dark']) {
-    --bg: #111210;
-    --surface: #181916;
+    --bg: #0e1112;
+    --surface: #15191a;
     --text: #ecece6;
     --muted: #afb0a9;
     --control-text: #c8c9c2;
     --control-active: #f2f2ec;
-    --grid-weak-theme: #30312d;
-    --grid-strong-theme: #5f605a;
-    --border: #40413c;
-    --panel-border: #4a4b45;
-    --hover: #252620;
-    --timeline-text: #a9aaa3;
-    --timeline-mark: #b5b6af;
-    --today-accent: #79aef2;
-    --today-fill: rgba(121,174,242,.12);
+    --grid-weak-theme: #293031;
+    --grid-strong-theme: #505a5b;
+    --border: #343c3d;
+    --panel-border: #414a4b;
+    --hover: #1b2122;
+    --timeline-text: #a7afae;
+    --timeline-mark: #b2b9b8;
+    --today-accent: #5ecbd0;
+    --today-fill: rgba(94,203,208,.14);
     --press-fill: rgba(255,255,248,.16);
     --selection-bg: #315f8f;
     --selection-text: #ffffff;

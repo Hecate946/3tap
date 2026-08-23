@@ -1,11 +1,10 @@
-3tap compact habit rail update
+3tap clean-slate + palette patch
 
-- removes up/down row buttons; drag-to-reorder remains
-- shrinks the fixed habit rail from 6 grid columns (288px) to 4 (192px)
-- keeps the four top toolbar icons at one 48px column each
-- gives the remaining per-habit archive action a slightly larger 36px target / 18px glyph
+Changes:
+- Today accent is more turquoise in light and dark mode.
+- Dark mode uses a cooler charcoal palette instead of the prior brown/olive cast.
+- New boards start with zero habits; all starter habits were removed from board creation.
+- Includes a one-time production migration that permanently deletes ALL existing boards, habits, and entries.
+- Includes a matching one-time browser cache reset so deleted starter boards do not remain visible from localStorage.
 
-Apply from the 3tap project root:
-
-unzip -o ~/Downloads/3tap-4col-no-arrows-patch.zip
-npm run dev
+IMPORTANT: 20260823095000_clean_slate_reset.sql is intentionally destructive and runs once through the normal Supabase migration pipeline.
