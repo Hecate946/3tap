@@ -86,6 +86,7 @@
   let minimumVisibleDays = browser
     ? Math.max(1, Math.ceil((window.innerWidth - HABIT_WIDTH) / DAY_SIZE) + 1)
     : 32;
+  let windowStartOffset = -(Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT) - 1);
   const pendingByCell = new Map<string, PendingEntry>();
   const localTapValues = new Map<string, PendingEntry>();
   let syncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -115,7 +116,9 @@
   let dragLastClientY: number | null = null;
   let timelinePanPointerId: number | null = null;
   let timelinePanStartX = 0;
+  let timelinePanStartY = 0;
   let timelinePanStartScrollLeft = 0;
+  let timelinePanPointerType = '';
   let timelinePanActive = false;
 
   const entries = new SvelteMap<string, Entry>();
@@ -169,12 +172,10 @@
     return Math.floor((toUtc - fromUtc) / 86_400_000);
   }
 
-  function datesForWindow(endDay: Date, endOffset: number, visibleDays: number): DayColumn[] {
-    const end = shiftedDate(endDay, endOffset);
-    const windowDays = Math.max(WINDOW_DAYS, visibleDays + WINDOW_SHIFT);
-    const start = shiftedDate(end, -(windowDays - 1));
+  function datesForWindow(baseDay: Date, startOffset: number, endOffset: number): DayColumn[] {
     const days: DayColumn[] = [];
-    for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+    for (let offset = startOffset; offset <= endOffset; offset += 1) {
+      const cursor = shiftedDate(baseDay, offset);
       days.push({
         key: dateKey(cursor),
         weekday: WEEKDAY_LABELS[cursor.getDay()],
@@ -186,7 +187,7 @@
     return days;
   }
 
-  $: dates = datesForWindow(currentDay, windowEndOffset, minimumVisibleDays);
+  $: dates = datesForWindow(currentDay, windowStartOffset, windowEndOffset);
   $: todayKey = dateKey(currentDay);
   $: enrolledKey = enrollmentKey(board);
 
@@ -522,15 +523,21 @@
     showTodayButton = windowEndOffset < 0 || rightGap > 2;
   }
 
-  async function shiftTimelineWindow(delta: number, metrics: { dayWidth: number; habitWidth: number }) {
-    if (!scroller || delta === 0) return;
-    windowEndOffset += delta;
+  async function prependTimelineDays(count: number, metrics: { dayWidth: number; habitWidth: number }) {
+    if (!scroller || count <= 0) return;
+    const beforeScrollLeft = scroller.scrollLeft;
+    windowStartOffset -= count;
     await tick();
-    const beforeCompensation = scroller.scrollLeft;
-    const compensation = -delta * metrics.dayWidth;
-    scroller.scrollLeft = Math.max(0, beforeCompensation + compensation);
-    const appliedCompensation = scroller.scrollLeft - beforeCompensation;
-    if (timelinePanPointerId !== null) timelinePanStartScrollLeft += appliedCompensation;
+
+    const compensation = count * metrics.dayWidth;
+    scroller.scrollLeft = beforeScrollLeft + compensation;
+    if (timelinePanPointerId !== null) timelinePanStartScrollLeft += compensation;
+  }
+
+  async function appendTimelineDays(count: number) {
+    if (count <= 0 || windowEndOffset >= 0) return;
+    windowEndOffset = Math.min(0, windowEndOffset + count);
+    await tick();
   }
 
   async function maintainTimelineWindow() {
@@ -543,17 +550,22 @@
 
     if (scroller.scrollLeft < threshold && dates.length) {
       shiftingWindow = true;
-      await shiftTimelineWindow(-WINDOW_SHIFT, metrics);
-      shiftingWindow = false;
+      try {
+        await prependTimelineDays(WINDOW_SHIFT, metrics);
+      } finally {
+        shiftingWindow = false;
+      }
       updateTimelineStatus();
       return;
     }
 
     if (rightGap < threshold && windowEndOffset < 0) {
       shiftingWindow = true;
-      const shift = Math.min(WINDOW_SHIFT, -windowEndOffset);
-      await shiftTimelineWindow(shift, metrics);
-      shiftingWindow = false;
+      try {
+        await appendTimelineDays(Math.min(WINDOW_SHIFT, -windowEndOffset));
+      } finally {
+        shiftingWindow = false;
+      }
       updateTimelineStatus();
     }
   }
@@ -568,14 +580,16 @@
   }
 
   function startTimelinePan(event: PointerEvent) {
-    if (!scroller || event.button !== 0 || event.pointerType !== 'mouse' || dragActive) return;
+    if (!scroller || event.button !== 0 || !event.isPrimary || dragActive) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
 
-    event.preventDefault();
+    if (event.pointerType === 'mouse') event.preventDefault();
     timelinePanPointerId = event.pointerId;
     timelinePanStartX = event.clientX;
+    timelinePanStartY = event.clientY;
     timelinePanStartScrollLeft = scroller.scrollLeft;
+    timelinePanPointerType = event.pointerType;
     timelinePanActive = false;
     scroller.setPointerCapture?.(event.pointerId);
   }
@@ -583,10 +597,13 @@
   function moveTimelinePan(event: PointerEvent) {
     if (!scroller || event.pointerId !== timelinePanPointerId) return;
     const dx = event.clientX - timelinePanStartX;
-    if (!timelinePanActive && Math.abs(dx) < 2) return;
+    const dy = event.clientY - timelinePanStartY;
+    const threshold = timelinePanPointerType === 'mouse' ? 2 : 6;
+    if (!timelinePanActive && Math.abs(dx) < threshold) return;
+    if (!timelinePanActive && timelinePanPointerType !== 'mouse' && Math.abs(dx) <= Math.abs(dy)) return;
     if (!timelinePanActive) {
       timelinePanActive = true;
-      document.documentElement.classList.add('timeline-panning-cursor');
+      if (timelinePanPointerType === 'mouse') document.documentElement.classList.add('timeline-panning-cursor');
     }
     event.preventDefault();
     scroller.scrollLeft = timelinePanStartScrollLeft - dx;
@@ -596,12 +613,14 @@
     if (!scroller || event.pointerId !== timelinePanPointerId) return;
     if (scroller.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
     timelinePanPointerId = null;
+    timelinePanPointerType = '';
     timelinePanActive = false;
     document.documentElement.classList.remove('timeline-panning-cursor');
   }
 
   function cleanupTimelinePan() {
     timelinePanPointerId = null;
+    timelinePanPointerType = '';
     timelinePanActive = false;
     document.documentElement.classList.remove('timeline-panning-cursor');
   }
@@ -703,7 +722,9 @@
     const timelineWidth = Math.max(metrics.dayWidth, scroller.clientWidth - metrics.habitWidth);
     const visibleDays = Math.max(1, Math.floor(timelineWidth / metrics.dayWidth));
     const targetOffset = calendarDayDistance(today, target);
-    windowEndOffset = Math.min(0, targetOffset + visibleDays - 1);
+    const requiredDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
+    windowStartOffset = targetOffset - WINDOW_SHIFT;
+    windowEndOffset = Math.min(0, Math.max(targetOffset + visibleDays + WINDOW_SHIFT - 1, windowStartOffset + requiredDays - 1));
     await tick();
 
     const targetKey = dateKey(target);
@@ -718,8 +739,9 @@
 
   async function scrollToToday() {
     windowEndOffset = 0;
+    updateMinimumVisibleDays();
+    windowStartOffset = -(Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT) - 1);
     await tick();
-    if (updateMinimumVisibleDays()) await tick();
     if (scroller) {
       scroller.scrollLeft = scroller.scrollWidth;
       updateTimelineStatus();
@@ -1279,7 +1301,21 @@
       if (monthMenuOpen && !target?.closest('.month-slot')) monthMenuOpen = false;
     };
     const onResize = () => {
+      const previousMinimum = minimumVisibleDays;
       updateMinimumVisibleDays();
+      const requiredDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
+      const currentDays = windowEndOffset - windowStartOffset + 1;
+      if (minimumVisibleDays > previousMinimum && currentDays < requiredDays && scroller) {
+        const add = requiredDays - currentDays;
+        const beforeScrollLeft = scroller.scrollLeft;
+        windowStartOffset -= add;
+        void tick().then(() => {
+          if (!scroller) return;
+          scroller.scrollLeft = beforeScrollLeft + add * DAY_SIZE;
+          updateTimelineStatus();
+        });
+        return;
+      }
       updateTimelineStatus();
     };
     const onPageHide = () => {
@@ -2023,9 +2059,10 @@
     overflow-x: auto;
     overflow-y: hidden;
     overscroll-behavior-x: contain;
+    touch-action: pan-y;
     scrollbar-width: none;
     -ms-overflow-style: none;
-    -webkit-overflow-scrolling: touch;
+    -webkit-overflow-scrolling: auto;
     scroll-behavior: auto;
   }
   .grid-scroll::-webkit-scrollbar { display: none; }
