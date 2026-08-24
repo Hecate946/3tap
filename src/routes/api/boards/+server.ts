@@ -33,12 +33,12 @@ export async function POST(event: RequestEvent) {
     if (recoveryError) throw error(500, recoveryError.message);
     return json({
       credentials: { boardId, secret, recoveryCode },
-      board: { createdAt: existing.created_at, updatedAt, habits: [], archivedHabits: [], entries: [] }
+      board: { createdAt: existing.created_at, updatedAt, habits: [], archivedHabits: [], thoughts: [], entries: [] }
     });
   }
 
   return json({
     credentials: { boardId, secret, recoveryCode },
-    board: { createdAt: data.created_at, updatedAt: data.updated_at, habits: [], archivedHabits: [], entries: [] }
+    board: { createdAt: data.created_at, updatedAt: data.updated_at, habits: [], archivedHabits: [], thoughts: [], entries: [] }
   });
 }

@@ -1,17 +1,28 @@
 import { browser } from '$app/environment';
-import type { Board, Credentials, Habit, MarkValue } from '$lib/types';
+import type { Board, Credentials, Habit, MarkValue, Thought } from '$lib/types';
 
 const CREDS_KEY = '3tap.credentials.v1';
 const BOARD_KEY = '3tap.board.v1';
 const QUEUE_KEY = '3tap.queue.v1';
 const HABITS_DIRTY_KEY = '3tap.habits-dirty.v1';
+const THOUGHTS_DIRTY_KEY = '3tap.thoughts-dirty.v1';
 
-type CompactBoard = {
+type CompactBoardV2 = {
   v: 2;
   c: string;
   u?: string;
   h: Habit[];
   a?: Habit[];
+  e: [number, string, MarkValue][];
+};
+
+type CompactBoard = {
+  v: 3;
+  c: string;
+  u?: string;
+  h: Habit[];
+  a?: Habit[];
+  t?: Thought[];
   e: [number, string, MarkValue][];
 };
 
@@ -41,7 +52,7 @@ export function createLocalBoardState() {
     secret: randomSecret(),
     pendingCreate: true
   };
-  const board: Board = { createdAt: new Date().toISOString(), habits: [], archivedHabits: [], entries: [] };
+  const board: Board = { createdAt: new Date().toISOString(), habits: [], archivedHabits: [], thoughts: [], entries: [] };
   return { credentials, board };
 }
 
@@ -51,9 +62,10 @@ export function setCredentials(credentials: Credentials) {
 }
 
 export function getCachedBoard(): Board | null {
-  const cached = readJson<Board | CompactBoard>(BOARD_KEY);
+  const cached = readJson<Board | CompactBoardV2 | CompactBoard>(BOARD_KEY);
   if (!cached) return null;
-  if (!('v' in cached) || cached.v !== 2) return cached as Board;
+  if (!('v' in cached)) return cached as Board;
+  if (cached.v !== 2 && cached.v !== 3) return null;
   const habits = cached.h ?? [];
   const archivedHabits = cached.a ?? [];
   const allHabits = [...habits, ...archivedHabits];
@@ -61,7 +73,14 @@ export function getCachedBoard(): Board | null {
     const habitId = allHabits[index]?.id;
     return habitId && value !== 0 ? [{ habitId, date, value }] : [];
   });
-  return { createdAt: cached.c, updatedAt: cached.u, habits, archivedHabits, entries };
+  return {
+    createdAt: cached.c,
+    updatedAt: cached.u,
+    habits,
+    archivedHabits,
+    thoughts: cached.v === 3 ? (cached.t ?? []) : [],
+    entries
+  };
 }
 
 export function setCachedBoard(board: Board) {
@@ -76,11 +95,12 @@ export function setCachedBoard(board: Board) {
     if (index !== undefined && entry.value !== 0) entries.push([index, entry.date, entry.value]);
   }
   const compact: CompactBoard = {
-    v: 2,
+    v: 3,
     c: board.createdAt,
     ...(board.updatedAt ? { u: board.updatedAt } : {}),
     h: habits,
     ...(archivedHabits.length ? { a: archivedHabits } : {}),
+    ...(board.thoughts?.length ? { t: board.thoughts } : {}),
     e: entries
   };
   localStorage.setItem(BOARD_KEY, JSON.stringify(compact));
@@ -91,6 +111,13 @@ export function setHabitsDirty(dirty: boolean) {
   if (!browser) return;
   if (dirty) localStorage.setItem(HABITS_DIRTY_KEY, '1');
   else localStorage.removeItem(HABITS_DIRTY_KEY);
+}
+
+export function getThoughtsDirty() { return browser && localStorage.getItem(THOUGHTS_DIRTY_KEY) === '1'; }
+export function setThoughtsDirty(dirty: boolean) {
+  if (!browser) return;
+  if (dirty) localStorage.setItem(THOUGHTS_DIRTY_KEY, '1');
+  else localStorage.removeItem(THOUGHTS_DIRTY_KEY);
 }
 
 export function getQueue() { return readJson<PendingEntry[]>(QUEUE_KEY) ?? []; }
@@ -111,6 +138,7 @@ export function clearLocalBoard() {
   localStorage.removeItem(BOARD_KEY);
   localStorage.removeItem(QUEUE_KEY);
   localStorage.removeItem(HABITS_DIRTY_KEY);
+  localStorage.removeItem(THOUGHTS_DIRTY_KEY);
 }
 
 export function authHeaders(credentials: Credentials) {

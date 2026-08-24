@@ -3,7 +3,7 @@
   import { browser } from '$app/environment';
   import { flip } from 'svelte/animate';
   import { SvelteMap } from 'svelte/reactivity';
-  import type { Board, Credentials, Entry, Habit, MarkValue } from '$lib/types';
+  import type { Board, Credentials, Entry, Habit, MarkValue, Thought } from '$lib/types';
   import {
     authHeaders,
     clearLocalBoard,
@@ -13,10 +13,12 @@
     getCredentials,
     getHabitsDirty,
     getQueue,
+    getThoughtsDirty,
     setCachedBoard,
     setCredentials,
     setHabitsDirty,
     setQueue,
+    setThoughtsDirty,
     type PendingEntry
   } from '$lib/client';
 
@@ -39,7 +41,9 @@
   }
   let online = true;
   let theme: 'light' | 'dark' = 'light';
+  let view: 'habits' | 'thoughts' = 'habits';
   let navScrolled = false;
+  let navMenuOpen = false;
   let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
@@ -64,7 +68,14 @@
   let newHabitName = '';
   let editHabitInput: HTMLInputElement;
   let newHabitInput: HTMLInputElement;
+  let editingThoughtId: string | null = null;
+  let editingThoughtText = '';
+  let addingThought = false;
+  let newThoughtText = '';
+  let editThoughtInput: HTMLInputElement;
+  let newThoughtInput: HTMLInputElement;
   let pendingHabitSave: Habit[] | null = browser && board && getHabitsDirty() ? board.habits : null;
+  let pendingThoughtSave: Thought[] | null = browser && board && getThoughtsDirty() ? (board.thoughts ?? []) : null;
   let scroller: HTMLDivElement;
   let currentDay = new Date();
   let windowEndOffset = 0;
@@ -74,6 +85,7 @@
   const monthOptions = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
   let showTodayButton = false;
+  let savedHabitScrollLeft = 0;
   let shiftingWindow = false;
   let scrollRaf = 0;
   const DAY_SIZE = 48;
@@ -93,15 +105,18 @@
   let persistIdle: number | undefined;
   let queuePersistTimer: ReturnType<typeof setTimeout> | undefined;
   let habitFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  let thoughtFlushTimer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<void> | null = null;
   let syncPromise: Promise<void> | null = null;
   let registrationPromise: Promise<boolean> | null = null;
   let habitFlushPromise: Promise<void> | null = null;
-  let draggingHabitId: string | null = null;
+  let thoughtFlushPromise: Promise<void> | null = null;
+  let draggingItemId: string | null = null;
   let dragPointerId: number | null = null;
-  let dragCandidate: { habitId: string; startX: number; startY: number; offsetY: number } | null = null;
+  let dragCandidate: { itemId: string; kind: 'habit' | 'thought'; startX: number; startY: number; offsetY: number } | null = null;
   let dragActive = false;
   let dragOriginalHabits: Habit[] | null = null;
+  let dragOriginalThoughts: Thought[] | null = null;
   let dragPreviewName = '';
   let dragPreviewLeft = 0;
   let dragPreviewTop = 0;
@@ -340,7 +355,9 @@
     pendingByCell.clear();
     localTapValues.clear();
     pendingHabitSave = null;
+    pendingThoughtSave = null;
     setHabitsDirty(false);
+    setThoughtsDirty(false);
     entries.clear();
     habitStartKeys.clear();
     const fresh = createLocalBoardState();
@@ -392,6 +409,14 @@
     });
   }
 
+  function sameThoughtSnapshot(a: Thought[], b: Thought[]) {
+    return a.length === b.length && a.every((thought, index) => {
+      const other = b[index];
+      return thought.id === other?.id && thought.text === other.text && thought.position === other.position
+        && thought.createdAt === other.createdAt;
+    });
+  }
+
   async function fetchBoard() {
     if (!credentials) return;
     if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
@@ -414,14 +439,15 @@
     const remoteBoard = (await response.json()) as Board;
     const activeHabits = pendingHabitSave ?? remoteBoard.habits;
     const archivedHabits = pendingHabitSave ? (board?.archivedHabits ?? remoteBoard.archivedHabits ?? []) : (remoteBoard.archivedHabits ?? []);
+    const thoughts = pendingThoughtSave ? (board?.thoughts ?? []) : (remoteBoard.thoughts ?? []);
     if (remoteBoard.entriesDelta) {
       const validHabitIds = new Set([...remoteBoard.habits.map(h => h.id), ...archivedHabits.map(h => h.id), ...activeHabits.map(h => h.id)]);
       reconcileEntryDelta(remoteBoard.entries, validHabitIds);
     } else reconcileFullEntries(remoteBoard.entries);
-    const changed = !board || !sameHabitSnapshot(board.habits, activeHabits) || !sameHabitSnapshot(board.archivedHabits ?? [], archivedHabits) || board.createdAt !== remoteBoard.createdAt;
+    const changed = !board || !sameHabitSnapshot(board.habits, activeHabits) || !sameHabitSnapshot(board.archivedHabits ?? [], archivedHabits) || !sameThoughtSnapshot(board.thoughts ?? [], thoughts) || board.createdAt !== remoteBoard.createdAt;
     if (changed || !board) {
       habitStartKeys.clear();
-      board = { createdAt: remoteBoard.createdAt, updatedAt: remoteBoard.updatedAt, habits: activeHabits, archivedHabits, entries: [] };
+      board = { createdAt: remoteBoard.createdAt, updatedAt: remoteBoard.updatedAt, habits: activeHabits, archivedHabits, thoughts, entries: [] };
     } else board.updatedAt = remoteBoard.updatedAt;
     for (const [key] of localTapValues) if (!pendingByCell.has(key)) localTapValues.delete(key);
     schedulePersistence();
@@ -471,6 +497,7 @@
 
   async function sync() {
     if (syncPromise) return syncPromise;
+    if (dragActive) return;
     if (!credentials || !navigator.onLine || document.visibilityState === 'hidden') {
       online = navigator.onLine;
       return;
@@ -480,6 +507,7 @@
       try {
         if (!(await ensureBoardRegistered())) return;
         await flushHabitChanges();
+        await flushThoughtChanges();
         await flushQueue();
         await fetchBoard();
         online = true;
@@ -573,7 +601,7 @@
   }
 
   function onTimelineScroll() {
-    if (scrollRaf) return;
+    if (view !== 'habits' || scrollRaf) return;
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = 0;
       updateTimelineStatus();
@@ -582,6 +610,7 @@
   }
 
   function startTimelinePan(event: PointerEvent) {
+    if (view !== 'habits') return;
     if (!scroller || event.button !== 0 || !event.isPrimary || dragActive) return;
     if (event.pointerType !== 'mouse') return;
     const target = event.target as HTMLElement | null;
@@ -623,6 +652,7 @@
   }
 
   function startTimelineTouch(event: TouchEvent) {
+    if (view !== 'habits') return;
     if (!scroller || event.touches.length !== 1 || dragActive) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
@@ -654,6 +684,18 @@
   function endTimelineTouch() {
     timelineTouchId = null;
     timelineTouchAxis = '';
+  }
+
+  async function switchView(next: 'habits' | 'thoughts') {
+    if (next === view) return;
+    if (view === 'habits' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
+    view = next;
+    monthMenuOpen = false;
+    await tick();
+    if (next === 'habits' && scroller) {
+      scroller.scrollLeft = savedHabitScrollLeft;
+      updateTimelineStatus();
+    }
   }
 
   function visibleYear() {
@@ -758,6 +800,7 @@
   }
 
   function openAccess() {
+    navMenuOpen = false;
     if (!credentials) return;
     pairingCopied = false; recoveryInput = credentials.recoveryCode ?? ''; restoreCodeInput = ''; recoveryError = '';
     recoveryCopied = false; recovering = false; deleteBoardError = ''; panel = 'access';
@@ -765,7 +808,7 @@
     if (pairingLink !== nextLink) { pairingLink = nextLink; qrDataUrl = ''; }
     if (!qrDataUrl) void loadQrModule().then(({ toDataURL }) => toDataURL(pairingLink, { width: 280, margin: 1, color: { dark: '#11110f', light: '#f7f7f5' } })).then(url => { if (panel === 'access') qrDataUrl = url; }).catch(() => {});
     if (navigator.onLine) void (async () => {
-      await flushHabitChanges(); await flushQueue();
+      await flushHabitChanges(); await flushThoughtChanges(); await flushQueue();
       try { await ensureRecoveryCode(); recoveryInput = credentials?.recoveryCode ?? ''; } catch { recoveryInput = ''; }
     })();
   }
@@ -821,6 +864,7 @@
         habitFlushPromise = null;
         if (pendingHabitSave && navigator.onLine) {
           if (habitFlushTimer) clearTimeout(habitFlushTimer);
+      if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
           habitFlushTimer = setTimeout(() => {
             habitFlushTimer = undefined;
             void flushHabitChanges();
@@ -830,6 +874,115 @@
     })();
 
     return habitFlushPromise;
+  }
+
+  function normalizeThoughts(thoughts: Thought[]) {
+    return thoughts.map((thought, position) => ({ ...thought, position }));
+  }
+
+  function setLocalThoughts(thoughts: Thought[]) {
+    if (!board) return;
+    const next = normalizeThoughts(thoughts);
+    board = { ...board, thoughts: next };
+    pendingThoughtSave = next;
+    setThoughtsDirty(true);
+    schedulePersistence();
+
+    if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
+    thoughtFlushTimer = setTimeout(() => {
+      thoughtFlushTimer = undefined;
+      void flushThoughtChanges();
+    }, 80);
+  }
+
+  async function flushThoughtChanges() {
+    if (thoughtFlushPromise) return thoughtFlushPromise;
+    if (!credentials || !navigator.onLine || !pendingThoughtSave) return;
+    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
+
+    const sent = pendingThoughtSave;
+    thoughtFlushPromise = (async () => {
+      try {
+        const response = await fetch(`/api/boards/${credentials!.boardId}/thoughts`, {
+          method: 'PUT',
+          headers: authHeaders(credentials!),
+          body: JSON.stringify({ thoughts: sent.map(({ id, text }) => ({ id, text })) })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        if (pendingThoughtSave === sent) {
+          pendingThoughtSave = null;
+          setThoughtsDirty(false);
+          schedulePersistence();
+        }
+        online = true;
+      } catch {
+        online = navigator.onLine;
+      } finally {
+        thoughtFlushPromise = null;
+        if (pendingThoughtSave && navigator.onLine) {
+          if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
+          thoughtFlushTimer = setTimeout(() => {
+            thoughtFlushTimer = undefined;
+            void flushThoughtChanges();
+          }, 120);
+        }
+      }
+    })();
+
+    return thoughtFlushPromise;
+  }
+
+  async function beginEditThought(thought: Thought) {
+    editingThoughtId = thought.id;
+    editingThoughtText = thought.text;
+    await tick();
+    editThoughtInput?.focus();
+    editThoughtInput?.select();
+  }
+
+  function commitThoughtEdit() {
+    if (!board || !editingThoughtId) return;
+    const id = editingThoughtId;
+    const text = editingThoughtText.trim().slice(0, 240);
+    editingThoughtId = null;
+    editingThoughtText = '';
+    if (!text) {
+      setLocalThoughts((board.thoughts ?? []).filter((thought) => thought.id !== id));
+      return;
+    }
+    const current = (board.thoughts ?? []).find((thought) => thought.id === id);
+    if (!current || current.text === text) return;
+    setLocalThoughts((board.thoughts ?? []).map((thought) => thought.id === id ? { ...thought, text } : thought));
+  }
+
+  async function beginAddThought() {
+    addingThought = true;
+    newThoughtText = '';
+    await tick();
+    newThoughtInput?.focus();
+  }
+
+  function commitAddThought() {
+    if (!board || !addingThought) return;
+    const text = newThoughtText.trim().slice(0, 240);
+    addingThought = false;
+    newThoughtText = '';
+    if (!text) return;
+    const thoughts = board.thoughts ?? [];
+    setLocalThoughts([
+      ...thoughts,
+      { id: crypto.randomUUID(), text, position: thoughts.length, createdAt: new Date().toISOString() }
+    ]);
+  }
+
+  function cancelAddThought() {
+    addingThought = false;
+    newThoughtText = '';
+  }
+
+  function deleteThought(id: string) {
+    if (!board) return;
+    setLocalThoughts((board.thoughts ?? []).filter((thought) => thought.id !== id));
   }
 
   async function beginRename(habit: Habit) {
@@ -857,32 +1010,42 @@
     event.stopPropagation();
   }
 
-  function activateHabitDrag(event: PointerEvent) {
+  function activateItemDrag(event: PointerEvent) {
     if (!board || !dragCandidate || dragActive) return;
-    const habit = board.habits.find((item) => item.id === dragCandidate!.habitId);
-    const row = document.querySelector<HTMLTableRowElement>(`tr[data-habit-id="${dragCandidate.habitId}"]`);
-    const cell = row?.querySelector<HTMLElement>('.habit-name');
-    if (!habit || !cell) return;
+    const { kind, itemId } = dragCandidate;
+    const item = kind === 'habit'
+      ? board.habits.find((candidate) => candidate.id === itemId)
+      : (board.thoughts ?? []).find((candidate) => candidate.id === itemId);
+    const row = kind === 'habit'
+      ? document.querySelector<HTMLElement>(`tr[data-habit-id="${itemId}"]`)
+      : document.querySelector<HTMLElement>(`.thought-row[data-thought-id="${itemId}"]`);
+    const cell = row?.querySelector<HTMLElement>(kind === 'habit' ? '.habit-name' : '.thought-cell');
+    if (!item || !cell) return;
 
     const rect = cell.getBoundingClientRect();
-    const currentIndex = board.habits.findIndex((item) => item.id === habit.id);
+    const currentIndex = kind === 'habit'
+      ? board.habits.findIndex((candidate) => candidate.id === itemId)
+      : (board.thoughts ?? []).findIndex((candidate) => candidate.id === itemId);
     dragRowsTop = rect.top - Math.max(0, currentIndex) * rect.height;
     dragActive = true;
-    draggingHabitId = habit.id;
-    dragOriginalHabits = [...board.habits];
-    dragPreviewName = habit.name;
+    draggingItemId = itemId;
+    if (kind === 'habit') dragOriginalHabits = [...board.habits];
+    else dragOriginalThoughts = [...(board.thoughts ?? [])];
+    dragPreviewName = kind === 'habit' ? (item as Habit).name : (item as Thought).text;
     dragPreviewLeft = rect.left;
     dragPreviewWidth = rect.width;
     dragPreviewHeight = rect.height;
     dragPreviewTop = event.clientY - dragCandidate.offsetY;
     dragLastClientY = dragCandidate.startY;
-    document.documentElement.classList.add('habit-dragging-cursor');
+    document.documentElement.classList.add('item-dragging-cursor');
     window.addEventListener('click', blockDragClick, true);
   }
 
-  function updateLiveHabitOrder(clientY: number) {
-    if (!board || !draggingHabitId || !dragCandidate) return;
-    const currentIndex = board.habits.findIndex((habit) => habit.id === draggingHabitId);
+  function updateLiveItemOrder(clientY: number) {
+    if (!board || !draggingItemId || !dragCandidate) return;
+    const { kind } = dragCandidate;
+    const items = kind === 'habit' ? board.habits : (board.thoughts ?? []);
+    const currentIndex = items.findIndex((item) => item.id === draggingItemId);
     if (currentIndex < 0) return;
     const previousY = dragLastClientY ?? clientY;
     const movingUp = clientY < previousY;
@@ -894,26 +1057,37 @@
     const rowHeight = dragPreviewHeight || DAY_SIZE;
     let targetIndex = currentIndex;
     if (movingUp) targetIndex = Math.max(0, Math.min(currentIndex, Math.floor((previewTop - dragRowsTop) / rowHeight)));
-    else targetIndex = Math.max(currentIndex, Math.min(board.habits.length - 1, Math.ceil((previewBottom - dragRowsTop) / rowHeight) - 1));
+    else targetIndex = Math.max(currentIndex, Math.min(items.length - 1, Math.ceil((previewBottom - dragRowsTop) / rowHeight) - 1));
     if (targetIndex === currentIndex) return;
-    const next = [...board.habits];
-    const [dragged] = next.splice(currentIndex, 1);
-    next.splice(targetIndex, 0, dragged);
-    board = { ...board, habits: normalizeHabits(next) };
+
+    if (kind === 'habit') {
+      const next = [...board.habits];
+      const [dragged] = next.splice(currentIndex, 1);
+      next.splice(targetIndex, 0, dragged);
+      board = { ...board, habits: normalizeHabits(next) };
+    } else {
+      const next = [...(board.thoughts ?? [])];
+      const [dragged] = next.splice(currentIndex, 1);
+      next.splice(targetIndex, 0, dragged);
+      board = { ...board, thoughts: normalizeThoughts(next) };
+    }
   }
 
-  function sameHabitOrder(a: Habit[], b: Habit[]) {
-    return a.length === b.length && a.every((habit, index) => habit.id === b[index]?.id);
+  function sameItemOrder(a: { id: string }[], b: { id: string }[]) {
+    return a.length === b.length && a.every((item, index) => item.id === b[index]?.id);
   }
 
-  function cleanupHabitDrag(commit = false) {
+  function cleanupItemDrag(commit = false) {
+    const kind = dragCandidate?.kind;
     const finalHabits = board?.habits ? [...board.habits] : null;
+    const finalThoughts = board ? [...(board.thoughts ?? [])] : null;
     const originalHabits = dragOriginalHabits;
+    const originalThoughts = dragOriginalThoughts;
 
-    window.removeEventListener('pointermove', onHabitDragMove);
-    window.removeEventListener('pointerup', onHabitDragEnd);
-    window.removeEventListener('pointercancel', onHabitDragCancel);
-    document.documentElement.classList.remove('habit-dragging-cursor');
+    window.removeEventListener('pointermove', onItemDragMove);
+    window.removeEventListener('pointerup', onItemDragEnd);
+    window.removeEventListener('pointercancel', onItemDragCancel);
+    document.documentElement.classList.remove('item-dragging-cursor');
     if (dragMoveRaf) cancelAnimationFrame(dragMoveRaf);
     dragMoveRaf = 0;
     dragPendingY = null;
@@ -921,28 +1095,30 @@
     if (dragActive) setTimeout(() => window.removeEventListener('click', blockDragClick, true), 0);
     else window.removeEventListener('click', blockDragClick, true);
 
-    if (board && originalHabits) {
-      if (commit && finalHabits && !sameHabitOrder(originalHabits, finalHabits)) {
-        setLocalHabits(finalHabits);
-      } else if (!commit) {
-        board = { ...board, habits: normalizeHabits(originalHabits) };
-      }
+    if (board && kind === 'habit' && originalHabits) {
+      if (commit && finalHabits && !sameItemOrder(originalHabits, finalHabits)) setLocalHabits(finalHabits);
+      else if (!commit) board = { ...board, habits: normalizeHabits(originalHabits) };
+    }
+    if (board && kind === 'thought' && originalThoughts) {
+      if (commit && finalThoughts && !sameItemOrder(originalThoughts, finalThoughts)) setLocalThoughts(finalThoughts);
+      else if (!commit) board = { ...board, thoughts: normalizeThoughts(originalThoughts) };
     }
 
-    draggingHabitId = null;
+    draggingItemId = null;
     dragPointerId = null;
     dragCandidate = null;
     dragActive = false;
     dragOriginalHabits = null;
+    dragOriginalThoughts = null;
     dragPreviewName = '';
     dragRowsTop = 0;
   }
 
-  function onHabitDragMove(event: PointerEvent) {
+  function onItemDragMove(event: PointerEvent) {
     if (!dragCandidate || event.pointerId !== dragPointerId) return;
     const dx = event.clientX - dragCandidate.startX;
     const dy = event.clientY - dragCandidate.startY;
-    if (!dragActive && Math.hypot(dx, dy) >= 5) activateHabitDrag(event);
+    if (!dragActive && Math.hypot(dx, dy) >= 5) activateItemDrag(event);
     if (!dragActive) return;
 
     event.preventDefault();
@@ -955,11 +1131,11 @@
       const clientY = dragPendingY;
       dragPendingY = null;
       dragPreviewTop = clientY - dragCandidate.offsetY;
-      updateLiveHabitOrder(clientY);
+      updateLiveItemOrder(clientY);
     });
   }
 
-  function onHabitDragEnd(event: PointerEvent) {
+  function onItemDragEnd(event: PointerEvent) {
     if (dragPointerId !== null && event.pointerId !== dragPointerId) return;
     if (dragActive && dragCandidate && dragPendingY !== null) {
       if (dragMoveRaf) cancelAnimationFrame(dragMoveRaf);
@@ -967,34 +1143,36 @@
       const clientY = dragPendingY;
       dragPendingY = null;
       dragPreviewTop = clientY - dragCandidate.offsetY;
-      updateLiveHabitOrder(clientY);
+      updateLiveItemOrder(clientY);
     }
-
-    cleanupHabitDrag(true);
+    cleanupItemDrag(true);
   }
 
-  function onHabitDragCancel(event: PointerEvent) {
+  function onItemDragCancel(event: PointerEvent) {
     if (dragPointerId !== null && event.pointerId !== dragPointerId) return;
-    cleanupHabitDrag(false);
+    cleanupItemDrag(false);
   }
 
-  function startHabitDrag(event: PointerEvent, habitId: string) {
-    if (!board || event.button !== 0 || editingHabitId === habitId) return;
+  function startItemDrag(event: PointerEvent, itemId: string, kind: 'habit' | 'thought') {
+    if (!board || event.button !== 0) return;
+    if (kind === 'habit' && editingHabitId === itemId) return;
+    if (kind === 'thought' && editingThoughtId === itemId) return;
     const target = event.target as HTMLElement;
-    if (target.closest('.habit-controls, input')) return;
+    if (target.closest('.habit-controls, .thought-controls, input')) return;
 
     const cell = event.currentTarget as HTMLElement;
     const rect = cell.getBoundingClientRect();
     dragPointerId = event.pointerId;
     dragCandidate = {
-      habitId,
+      itemId,
+      kind,
       startX: event.clientX,
       startY: event.clientY,
       offsetY: event.clientY - rect.top
     };
-    window.addEventListener('pointermove', onHabitDragMove, { passive: false });
-    window.addEventListener('pointerup', onHabitDragEnd);
-    window.addEventListener('pointercancel', onHabitDragCancel);
+    window.addEventListener('pointermove', onItemDragMove, { passive: false });
+    window.addEventListener('pointerup', onItemDragEnd);
+    window.addEventListener('pointercancel', onItemDragCancel);
   }
 
   function undoArchiveToast() {
@@ -1043,6 +1221,7 @@
   }
 
   function openArchived() {
+    navMenuOpen = false;
     panel = 'archived';
   }
 
@@ -1196,7 +1375,9 @@
       pendingByCell.clear();
       localTapValues.clear();
       pendingHabitSave = null;
+      pendingThoughtSave = null;
       setHabitsDirty(false);
+      setThoughtsDirty(false);
       entries.clear();
       hydrateEntries(recovered.board);
       qrDataUrl = '';
@@ -1296,6 +1477,7 @@
     const onDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (monthMenuOpen && !target?.closest('.month-control')) monthMenuOpen = false;
+      if (navMenuOpen && !target?.closest('.nav-actions')) navMenuOpen = false;
     };
     const onResize = () => {
       const previousMinimum = minimumVisibleDays;
@@ -1319,6 +1501,7 @@
       cancelScheduledPersistence();
       persistLocalStateNow();
       void flushHabitChanges();
+      void flushThoughtChanges();
       void flushQueue({ keepalive: true });
     };
 
@@ -1359,9 +1542,10 @@
       cancelScheduledPersistence();
       if (queuePersistTimer) clearTimeout(queuePersistTimer);
       if (habitFlushTimer) clearTimeout(habitFlushTimer);
+      if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
       if (archiveToastTimer) clearTimeout(archiveToastTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
-      cleanupHabitDrag(false);
+      cleanupItemDrag(false);
       cleanupTimelinePan();
     };
   });
@@ -1375,7 +1559,30 @@
 <div class="shell">
   <header class="nav-shell" class:scrolled={navScrolled}>
     <div class="navbar">
-      <div class="brand-slot">3tap</div>
+      <div class="brand-slot">
+        <button class="brand-button" aria-label="Habits" onclick={() => void switchView('habits')}>3tap</button>
+      </div>
+      <div class="nav-actions">
+        <button
+          class="nav-more"
+          aria-label="More"
+          aria-haspopup="menu"
+          aria-expanded={navMenuOpen}
+          onclick={() => (navMenuOpen = !navMenuOpen)}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="6" cy="12" r="1.35"></circle>
+            <circle cx="12" cy="12" r="1.35"></circle>
+            <circle cx="18" cy="12" r="1.35"></circle>
+          </svg>
+        </button>
+        {#if navMenuOpen}
+          <div class="nav-menu" role="menu" aria-label="More">
+            <button role="menuitem" onclick={openAccess}>access</button>
+            <button role="menuitem" onclick={openArchived}>archive</button>
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
 
@@ -1383,8 +1590,9 @@
     <main>
       <div
         class="grid-scroll"
+        class:thoughts-mode={view === 'thoughts'}
         role="region"
-        aria-label="Habit timeline"
+        aria-label={view === 'habits' ? 'Habit timeline' : 'Thoughts'}
         bind:this={scroller}
         onscroll={onTimelineScroll}
         onpointerdown={startTimelinePan}
@@ -1396,20 +1604,27 @@
           <div class="timeline-header" aria-label="Timeline">
             <div class="timeline-side">
               <nav class="timeline-controls" aria-label="App controls">
-                <button class="tool-icon device-tool" aria-label="Access and devices" title="Access" onclick={openAccess}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="5" y="2" width="14" height="20" rx="2.25" class="icon-fill" stroke="none"></rect>
-                    <rect x="7" y="4" width="10" height="14" rx=".75" class="icon-cutout" stroke="none"></rect>
-                    <circle cx="12" cy="20" r=".8" class="icon-cutout" stroke="none"></circle>
-                  </svg>
+                <button
+                  class="tool-icon thoughts-tool"
+                  class:active={view === 'thoughts'}
+                  aria-label={view === 'thoughts' ? 'Back to habits' : 'Thoughts'}
+                  title={view === 'thoughts' ? 'Habits' : 'Thoughts'}
+                  onclick={() => void switchView(view === 'thoughts' ? 'habits' : 'thoughts')}
+                >
+                  {#if view === 'thoughts'}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="4" y="4" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
+                      <rect x="14" y="4" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
+                      <rect x="4" y="14" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
+                      <rect x="14" y="14" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
+                    </svg>
+                  {:else}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path>
+                    </svg>
+                  {/if}
                 </button>
-                <button class="tool-icon archive-tool" aria-label="Archive" title="Archive" onclick={openArchived}>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="3" y="7" width="18" height="14" rx="2" class="icon-fill" stroke="none"></rect>
-                    <rect x="2" y="3" width="20" height="5" rx="1.5" class="icon-fill" stroke="none"></rect>
-                    <rect x="9" y="11" width="6" height="2" rx="1" class="icon-cutout" stroke="none"></rect>
-                  </svg>
-                </button>
+                <div class="tool-placeholder" aria-hidden="true"></div>
                 <button
                   class="tool-icon theme-toggle"
                   aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
@@ -1436,6 +1651,7 @@
                 </button>
               </nav>
             </div>
+            {#if view === 'habits'}
             <div class="timeline-main-header">
               <div class="timeline-meta-row">
                 <div class="month-slot" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
@@ -1503,8 +1719,73 @@
                 {/each}
               </div>
             </div>
+            {:else}
+              <div class="thoughts-header">
+                <span>thoughts</span>
+                {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+              </div>
+            {/if}
           </div>
-          {#if board.habits.length === 0}
+          {#if view === 'thoughts'}
+            <div class="thoughts-grid" aria-label="Thoughts">
+              {#each board.thoughts ?? [] as thought (thought.id)}
+                <div
+                  class="thought-row"
+                  class:dragging={dragActive && draggingItemId === thought.id}
+                  data-thought-id={thought.id}
+                  animate:flip={{ duration: dragActive ? 120 : 0 }}
+                >
+                  <div
+                    class="thought-cell"
+                    aria-label={`Drag ${thought.text} to reorder`}
+                    onpointerdown={(event) => startItemDrag(event, thought.id, 'thought')}
+                  >
+                    {#if editingThoughtId === thought.id}
+                      <input
+                        class="thought-input"
+                        bind:this={editThoughtInput}
+                        bind:value={editingThoughtText}
+                        maxlength="240"
+                        aria-label="Edit thought"
+                        onblur={commitThoughtEdit}
+                        onkeydown={(event) => {
+                          if (event.key === 'Enter') event.currentTarget.blur();
+                          if (event.key === 'Escape') {
+                            editingThoughtId = null;
+                            editingThoughtText = '';
+                          }
+                        }}
+                      />
+                    {:else}
+                      <button class="thought-label" onclick={() => beginEditThought(thought)}>{thought.text}</button>
+                    {/if}
+                    <div class="thought-controls">
+                      <button aria-label={`Delete ${thought.text}`} title="Delete" onclick={() => deleteThought(thought.id)}>×</button>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+              <div class="thought-add-row">
+                {#if addingThought}
+                  <input
+                    class="thought-input"
+                    bind:this={newThoughtInput}
+                    bind:value={newThoughtText}
+                    maxlength="240"
+                    placeholder="idea or todo"
+                    aria-label="New thought"
+                    onblur={commitAddThought}
+                    onkeydown={(event) => {
+                      if (event.key === 'Enter') event.currentTarget.blur();
+                      if (event.key === 'Escape') cancelAddThought();
+                    }}
+                  />
+                {:else}
+                  <button class="add-thought" onclick={beginAddThought}>+ thought</button>
+                {/if}
+              </div>
+            </div>
+          {:else if board.habits.length === 0}
             <div class="zero-add-row">
               <div class="zero-add-cell">
                 {#if addingHabit}
@@ -1531,13 +1812,13 @@
             {#each board.habits as habit, habitIndex (habit.id)}
               <tr
                 data-habit-id={habit.id}
-                class:dragging={dragActive && draggingHabitId === habit.id}
+                class:dragging={dragActive && draggingItemId === habit.id}
                 animate:flip={{ duration: dragActive ? 120 : 0 }}
               >
                 <th
                   class="habit-name"
                   aria-label={`Drag ${habit.name} to reorder`}
-                  onpointerdown={(event) => startHabitDrag(event, habit.id)}
+                  onpointerdown={(event) => startItemDrag(event, habit.id, 'habit')}
                 >
                   <div class="habit-line">
                     {#if editingHabitId === habit.id}
@@ -1636,7 +1917,7 @@
           {/if}
         </div>
       </div>
-      {#if board.habits.length === 0}
+      {#if view === 'habits' && board.habits.length === 0}
         <section class="zero-tutorial" aria-label="Getting started">
           <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
           <ul class="zero-tutorial-list">
@@ -1644,7 +1925,8 @@
             <li>older days lock; <b>·</b> means before the habit existed</li>
             <li>tap a habit name to rename; drag it to reorder</li>
             <li>swipe/drag sideways for history; tap month/year to jump</li>
-            <li>archive keeps history; phone pairs or recovers; moon/sun changes theme</li>
+            <li>thought bubble opens scratchpad; moon/sun changes theme</li>
+            <li>••• opens access and archive</li>
           </ul>
         </section>
       {/if}
@@ -1655,7 +1937,7 @@
 
   {#if dragActive}
     <div
-      class="habit-drag-preview"
+      class="item-drag-preview"
       style={`left:${dragPreviewLeft}px; top:${dragPreviewTop}px; width:${dragPreviewWidth}px; height:${dragPreviewHeight}px`}
       aria-hidden="true"
     >
@@ -1787,7 +2069,7 @@
         </div>
       {:else if panel === 'delete-board'}
         <h2>delete this board?</h2>
-        <p>This permanently deletes every habit and all history on every paired device. This device will start with a new empty board.</p>
+        <p>This permanently deletes every habit, thought, and all history on every paired device. This device will start with a new empty board.</p>
         {#if deleteBoardError}<p class="archive-error" role="alert">{deleteBoardError}</p>{/if}
         <div class="panel-confirm-actions">
           <button class="panel-button" onclick={() => (panel = 'access')}>cancel</button>
@@ -1832,7 +2114,7 @@
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
-    --icon-device: #225866;
+    --icon-thoughts: #225866;
     --icon-archive: #af4b53;
     --icon-theme: #ca9503;
     --danger: #9b332b;
@@ -1862,7 +2144,7 @@
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
-    --icon-device: #225866;
+    --icon-thoughts: #225866;
     --icon-archive: #af4b53;
     --icon-theme: #ca9503;
     --danger: #e58d82;
@@ -1879,8 +2161,8 @@
   :global(::selection) { background: var(--selection-bg); color: var(--selection-text); }
   :global(::-moz-selection) { background: var(--selection-bg); color: var(--selection-text); }
   :global(button) { color: inherit; }
-  :global(html.habit-dragging-cursor),
-  :global(html.habit-dragging-cursor *) { cursor: grabbing !important; }
+  :global(html.item-dragging-cursor),
+  :global(html.item-dragging-cursor *) { cursor: grabbing !important; }
   :global(html.timeline-panning-cursor),
   :global(html.timeline-panning-cursor *) { cursor: grabbing !important; }
 
@@ -1905,6 +2187,7 @@
   }
   .nav-shell.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
   .navbar {
+    position: relative;
     height: calc(var(--day-size) + env(safe-area-inset-top));
     min-height: calc(var(--day-size) + env(safe-area-inset-top));
     width: 100%;
@@ -1935,6 +2218,57 @@
     background: var(--grid);
     pointer-events: none;
   }
+  .brand-button {
+    color: inherit;
+    font-size: inherit;
+    letter-spacing: inherit;
+  }
+  .brand-button:focus-visible,
+  .nav-more:focus-visible,
+  .nav-menu button:focus-visible {
+    outline: 1px solid var(--control-active);
+    outline-offset: -2px;
+  }
+  .nav-actions {
+    position: absolute;
+    top: env(safe-area-inset-top);
+    right: 0;
+    width: var(--day-size);
+    height: var(--day-size);
+  }
+  .nav-more {
+    width: var(--day-size);
+    height: var(--day-size);
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+  }
+  .nav-more svg {
+    width: 20px;
+    height: 20px;
+    fill: currentColor;
+  }
+  .nav-menu {
+    position: absolute;
+    z-index: 90;
+    top: var(--day-size);
+    right: 8px;
+    width: 88px;
+    background: var(--bg);
+    border: var(--line) solid var(--grid);
+  }
+  .nav-menu button {
+    width: 100%;
+    height: 30px;
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    border-bottom: var(--line) solid var(--grid);
+    color: var(--control-text);
+    font-size: 10px;
+    text-align: left;
+  }
+  .nav-menu button:last-child { border-bottom: 0; }
   .month-slot,
   .timeline-meta-fill,
   .today-slot {
@@ -2053,21 +2387,24 @@
     border-bottom-color: var(--control-active);
   }
   @media (hover: hover) and (pointer: fine) {
-    :global(html:not(.habit-dragging-cursor)) .tool-icon:hover::before { opacity: .12; }
-    :global(html:not(.habit-dragging-cursor)) .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
-    :global(html:not(.habit-dragging-cursor)) .panel-button-danger:not(:disabled):hover { color: var(--danger); }
-    :global(html:not(.habit-dragging-cursor)) .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
-    :global(html:not(.habit-dragging-cursor)) .month-button:hover,
-    :global(html:not(.habit-dragging-cursor)) .year-input:hover,
-    :global(html:not(.habit-dragging-cursor)) .nav-today:hover {
+    :global(html:not(.item-dragging-cursor)) .tool-icon:hover::before { opacity: .12; }
+    :global(html:not(.item-dragging-cursor)) .nav-more:hover { color: var(--text); }
+    :global(html:not(.item-dragging-cursor)) .nav-menu button:hover { background: var(--hover); color: var(--control-active); }
+    :global(html:not(.item-dragging-cursor)) .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
+    :global(html:not(.item-dragging-cursor)) .panel-button-danger:not(:disabled):hover { color: var(--danger); }
+    :global(html:not(.item-dragging-cursor)) .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
+    :global(html:not(.item-dragging-cursor)) .month-button:hover,
+    :global(html:not(.item-dragging-cursor)) .year-input:hover,
+    :global(html:not(.item-dragging-cursor)) .nav-today:hover {
       color: var(--control-active);
       border-bottom-color: var(--control-active);
     }
-    :global(html:not(.habit-dragging-cursor)) .date-option:hover { background: var(--hover); color: var(--control-active); }
-    :global(html:not(.habit-dragging-cursor)) .habit-controls button:not(:disabled):hover { opacity: 1; }
-    :global(html:not(.habit-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
+    :global(html:not(.item-dragging-cursor)) .date-option:hover { background: var(--hover); color: var(--control-active); }
+    :global(html:not(.item-dragging-cursor)) .habit-controls button:not(:disabled):hover,
+    :global(html:not(.item-dragging-cursor)) .thought-controls button:not(:disabled):hover { opacity: 1; }
+    :global(html:not(.item-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
     .grid-scroll { cursor: grab; }
-    .habit-name { cursor: grab; }
+    .habit-name, .thought-cell { cursor: grab; }
   }
 
   main { width: 100%; padding-bottom: 24px; }
@@ -2084,6 +2421,15 @@
     scroll-behavior: auto;
   }
   .grid-scroll::-webkit-scrollbar { display: none; }
+  .grid-scroll.thoughts-mode {
+    overflow-x: hidden;
+    cursor: default;
+  }
+  .grid-scroll.thoughts-mode .grid-frame,
+  .grid-scroll.thoughts-mode .timeline-header {
+    width: 100%;
+    min-width: 100%;
+  }
   .grid-frame {
     position: relative;
     width: max-content;
@@ -2146,8 +2492,9 @@
     pointer-events: none;
     transition: opacity 110ms ease;
   }
-  .device-tool { color: var(--icon-device); }
-  .archive-tool { color: var(--icon-archive); }
+  .thoughts-tool { color: var(--icon-thoughts); }
+  .thoughts-tool.active::before { opacity: .10; }
+  .tool-placeholder { color: var(--icon-archive); }
   .theme-toggle { color: var(--icon-theme); }
   .tool-icon svg {
     position: relative;
@@ -2172,6 +2519,17 @@
     position: relative;
     width: max-content;
     height: var(--day-size);
+  }
+  .thoughts-header {
+    flex: 1;
+    min-width: 0;
+    height: var(--day-size);
+    padding: 0 var(--page-inset);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--control-text);
+    font-size: 11px;
   }
   .timeline-meta-row {
     position: sticky;
@@ -2347,8 +2705,9 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   }
   .habit-name:active { cursor: grabbing; }
   tr.dragging > th,
-  tr.dragging > td { opacity: .08; }
-  .habit-drag-preview {
+  tr.dragging > td,
+  .thought-row.dragging { opacity: .08; }
+  .item-drag-preview {
     position: fixed;
     z-index: 250;
     display: flex;
@@ -2361,6 +2720,74 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     font-weight: 500;
     pointer-events: none;
     will-change: top;
+  }
+  .thoughts-grid {
+    width: 100%;
+    background: var(--bg);
+  }
+  .thought-row,
+  .thought-add-row {
+    width: 100%;
+    height: var(--day-size);
+    border-bottom: var(--line) solid var(--grid);
+  }
+  .thought-cell {
+    width: 100%;
+    height: 100%;
+    padding: 0 8px 0 var(--page-inset);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .thought-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .thought-input {
+    flex: 1;
+    min-width: 0;
+    height: 30px;
+    border: 0;
+    border-bottom: var(--line) solid var(--border);
+    border-radius: 0;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    font-size: 12px;
+  }
+  .thought-controls {
+    flex: none;
+    width: 36px;
+    height: 36px;
+  }
+  .thought-controls button {
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    color: var(--icon-archive);
+    font-size: 17px;
+    line-height: 1;
+    opacity: .72;
+  }
+  .thought-add-row {
+    padding: 0 var(--page-inset);
+    display: flex;
+    align-items: center;
+  }
+  .add-thought {
+    color: var(--muted);
+    font-size: 11px;
   }
   .habit-inline-input {
     flex: 1;

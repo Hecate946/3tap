@@ -8,6 +8,13 @@ export type Habit = {
   archivedAt?: string;
 };
 
+export type Thought = {
+  id: string;
+  text: string;
+  position: number;
+  createdAt?: string;
+};
+
 export type Entry = {
   habitId: string;
   date: string;
@@ -19,6 +26,7 @@ export type Board = {
   updatedAt?: string;
   habits: Habit[];
   archivedHabits?: Habit[];
+  thoughts?: Thought[];
   entries: Entry[];
   entriesDelta?: boolean;
 };

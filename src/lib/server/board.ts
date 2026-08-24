@@ -1,10 +1,11 @@
 import { error } from '@sveltejs/kit';
 import { db } from './db';
-import type { Board, Habit, MarkValue } from '$lib/types';
+import type { Board, Habit, MarkValue, Thought } from '$lib/types';
 
 type BoardMeta = { created_at: string; updated_at?: string | null };
 type HabitRow = { id: string; name: string; position: number; created_at: string; archived_at: string | null };
 type EntryRow = { habit_id: string; entry_date: string; value: number };
+type ThoughtRow = { id: string; text: string; position: number; created_at: string };
 
 async function getHabits(boardId: string) {
   const { data, error: dbError } = await db.from('habits')
@@ -14,6 +15,22 @@ async function getHabits(boardId: string) {
     id: h.id, name: h.name, position: h.position, createdAt: h.created_at, archivedAt: h.archived_at ?? undefined
   }));
   return { habits: mapped.filter(h => !h.archivedAt), archivedHabits: mapped.filter(h => Boolean(h.archivedAt)) };
+}
+
+
+async function getThoughts(boardId: string) {
+  const { data, error: dbError } = await db.from('thoughts')
+    .select('id, text, position, created_at').eq('board_id', boardId).order('position');
+  if (dbError) {
+    if (dbError.code === 'PGRST205' || dbError.code === '42P01') return [];
+    throw error(500, dbError.message);
+  }
+  return ((data ?? []) as ThoughtRow[]).map<Thought>(thought => ({
+    id: thought.id,
+    text: thought.text,
+    position: thought.position,
+    createdAt: thought.created_at
+  }));
 }
 
 async function getEntries(boardId: string, since?: string): Promise<EntryRow[]> {
@@ -51,9 +68,10 @@ async function getEntries(boardId: string, since?: string): Promise<EntryRow[]> 
 }
 
 export async function getBoard(boardId: string, metadata?: BoardMeta, since?: string): Promise<Board> {
-  const [boardResult, habitData, entries] = await Promise.all([
+  const [boardResult, habitData, thoughts, entries] = await Promise.all([
     metadata ? Promise.resolve({ data: metadata, error: null }) : db.from('boards').select('created_at, updated_at').eq('id', boardId).single(),
     getHabits(boardId),
+    getThoughts(boardId),
     getEntries(boardId, since)
   ]);
   const { data: board, error: boardError } = boardResult;
@@ -62,6 +80,7 @@ export async function getBoard(boardId: string, metadata?: BoardMeta, since?: st
     createdAt: board.created_at,
     updatedAt: board.updated_at ?? undefined,
     ...habitData,
+    thoughts,
     entries: entries.map(e => ({ habitId: e.habit_id, date: e.entry_date, value: e.value as MarkValue })),
     ...(since ? { entriesDelta: true } : {})
   };
