@@ -1,16 +1,32 @@
-3tap habit reorder polish
+# 3tap
 
-- smoother drag-to-reorder on desktop + mobile
-- vertical-intent thresholds prevent accidental drags
-- horizontal movement in the habit rail cancels reorder instead of fighting the UI
-- fixed 48px geometry avoids repeated DOM measurements while dragging
-- surrounding rows move one slot at a time for predictable ordering
-- dragging near the top/bottom auto-scrolls long habit lists
-- remote sync pauses during an active drag, then saves once on drop
-- zero-state + habit row remains excluded from timeline panning
-- floating drag preview uses GPU transform instead of changing layout position every frame
+tiny three-state habit grid + quick thoughts.
 
-Apply from the 3tap project root:
-  unzip -o ~/Downloads/3tap-reorder-smooth-patch.zip
-  npm run check
-  npm run dev
+```bash
+npm run dev
+```
+
+## fake history
+
+dev only. these never sync, never touch your real board, and do nothing in production.
+
+- `/?fixture=empty`
+- `/?fixture=1d`
+- `/?fixture=2d`
+- `/?fixture=7d`
+- `/?fixture=31d`
+- `/?fixture=6mo`
+- `/?fixture=late` — habits added at different times
+- `/?fixture=sparse`
+
+example: `http://localhost:5173/?fixture=31d`
+
+refresh to reset the fixture.
+
+## send the source
+
+```bash
+npm run site:zip
+```
+
+creates `3tap-source.zip` in the project root. it includes the source/config/migrations and skips dependencies, build output, env files, secrets, and old zips.

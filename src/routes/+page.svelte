@@ -4,6 +4,7 @@
   import { flip } from 'svelte/animate';
   import { SvelteMap } from 'svelte/reactivity';
   import type { Board, Credentials, Entry, Habit, MarkValue, Thought } from '$lib/types';
+  import { createDevFixture } from '$lib/dev/fixtures';
   import {
     authHeaders,
     clearLocalBoard,
@@ -23,15 +24,20 @@
   } from '$lib/client';
 
   type DayColumn = { key: string; weekday: string; day: number; month: number; year: number };
+  const requestedFixture = browser && import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get('fixture')
+    : null;
+  const fixtureBoard = requestedFixture ? createDevFixture(requestedFixture) : null;
+  const fixtureMode = fixtureBoard !== null;
   const CLIENT_RESET_VERSION = '2026-08-23-clean-slate-v1';
-  if (browser && localStorage.getItem('3tap.client-reset') !== CLIENT_RESET_VERSION) {
+  if (browser && !fixtureMode && localStorage.getItem('3tap.client-reset') !== CLIENT_RESET_VERSION) {
     clearLocalBoard();
     localStorage.setItem('3tap.client-reset', CLIENT_RESET_VERSION);
   }
 
-  let credentials: Credentials | null = browser ? getCredentials() : null;
-  let board: Board | null = browser ? getCachedBoard() : null;
-  if (browser && !credentials) {
+  let credentials: Credentials | null = fixtureMode ? null : (browser ? getCredentials() : null);
+  let board: Board | null = fixtureBoard ?? (browser ? getCachedBoard() : null);
+  if (browser && !fixtureMode && !credentials) {
     if (board) clearLocalBoard();
     const fresh = createLocalBoardState();
     credentials = fresh.credentials;
@@ -41,7 +47,7 @@
   }
   let online = true;
   let theme: 'light' | 'dark' = 'light';
-  let view: 'habits' | 'thoughts' | 'stats' = 'habits';
+  let view: 'habits' | 'thoughts' = 'habits';
   let navScrolled = false;
   let navMenuOpen = false;
   let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
@@ -74,14 +80,14 @@
   let newThoughtText = '';
   let editThoughtInput: HTMLInputElement;
   let newThoughtInput: HTMLInputElement;
-  let pendingHabitSave: Habit[] | null = browser && board && getHabitsDirty() ? board.habits : null;
-  let pendingThoughtSave: Thought[] | null = browser && board && getThoughtsDirty() ? (board.thoughts ?? []) : null;
+  let pendingHabitSave: Habit[] | null = !fixtureMode && browser && board && getHabitsDirty() ? board.habits : null;
+  let pendingThoughtSave: Thought[] | null = !fixtureMode && browser && board && getThoughtsDirty() ? (board.thoughts ?? []) : null;
   let scroller: HTMLDivElement;
   let currentDay = new Date();
   let windowEndOffset = 0;
   let displayMonthIndex = currentDay.getMonth();
   let displayYear = currentDay.getFullYear();
-  let monthMenuOpen = false;
+  let showStartButton = false;
   const monthOptions = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
   let showTodayButton = false;
@@ -187,9 +193,18 @@
     return Math.floor((toUtc - fromUtc) / 86_400_000);
   }
 
+  function timelineStartDate() {
+    return enrollmentDate(board) ?? currentDay;
+  }
+
+  function earliestTimelineOffset() {
+    return Math.min(0, calendarDayDistance(currentDay, timelineStartDate()));
+  }
+
   function datesForWindow(baseDay: Date, startOffset: number, endOffset: number): DayColumn[] {
     const days: DayColumn[] = [];
-    for (let offset = startOffset; offset <= endOffset; offset += 1) {
+    const firstOffset = Math.max(startOffset, earliestTimelineOffset());
+    for (let offset = firstOffset; offset <= endOffset; offset += 1) {
       const cursor = shiftedDate(baseDay, offset);
       days.push({
         key: dateKey(cursor),
@@ -274,6 +289,7 @@
   }
 
   function persistLocalStateNow() {
+    if (fixtureMode) return;
     if (board) {
       const logicalEntries = new Map(entries);
       const localChanges = new Map<string, PendingEntry>();
@@ -305,7 +321,7 @@
   }
 
   function schedulePersistence() {
-    if (persistTimer || persistIdle !== undefined) return;
+    if (fixtureMode || persistTimer || persistIdle !== undefined) return;
     const commit = () => {
       persistTimer = undefined;
       persistIdle = undefined;
@@ -317,6 +333,7 @@
   }
 
   function scheduleQueuePersistence() {
+    if (fixtureMode) return;
     if (queuePersistTimer) clearTimeout(queuePersistTimer);
     queuePersistTimer = setTimeout(() => {
       queuePersistTimer = undefined;
@@ -325,6 +342,7 @@
   }
 
   function queueChange(change: PendingEntry) {
+    if (fixtureMode) return;
     pendingByCell.set(cellKey(change.habitId, change.date), change);
     scheduleQueuePersistence();
 
@@ -351,6 +369,7 @@
   }
 
   function resetToFreshLocalBoard() {
+    if (fixtureMode) return;
     clearLocalBoard();
     pendingByCell.clear();
     localTapValues.clear();
@@ -368,7 +387,7 @@
   }
 
   async function ensureBoardRegistered() {
-    if (!credentials) return false;
+    if (fixtureMode || !credentials) return false;
     if (!credentials.pendingCreate) return true;
     if (!navigator.onLine) return false;
     if (registrationPromise) return registrationPromise;
@@ -418,7 +437,7 @@
   }
 
   async function fetchBoard() {
-    if (!credentials) return;
+    if (fixtureMode || !credentials) return;
     if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
     const headers: Record<string, string> = authHeaders(credentials);
     if (board?.updatedAt) headers['if-none-match'] = `"${board.updatedAt}"`;
@@ -454,6 +473,7 @@
   }
 
   async function flushQueue(options: { keepalive?: boolean } = {}) {
+    if (fixtureMode) return;
     if (flushPromise) return flushPromise;
     if (pendingHabitSave || habitFlushPromise) {
       await flushHabitChanges();
@@ -496,6 +516,7 @@
   }
 
   async function sync() {
+    if (fixtureMode) return;
     if (syncPromise) return syncPromise;
     if (dragActive) return;
     if (!credentials || !navigator.onLine || document.visibilityState === 'hidden') {
@@ -544,21 +565,31 @@
     if (!scroller || !dates.length) return;
     const metrics = timelineMetrics();
     if (!metrics) return;
-    const index = Math.max(0, Math.min(dates.length - 1, Math.floor(scroller.scrollLeft / metrics.dayWidth)));
-    const date = dates[index];
-    setVisibleMonthState(date.year, date.month);
+
+    const timelineWidth = Math.max(metrics.dayWidth, scroller.clientWidth - metrics.habitWidth);
+    const latestVisibleIndex = Math.max(
+      0,
+      Math.min(dates.length - 1, Math.floor((scroller.scrollLeft + timelineWidth - 1) / metrics.dayWidth))
+    );
+    const latestVisibleDate = dates[latestVisibleIndex];
+    setVisibleMonthState(latestVisibleDate.year, latestVisibleDate.month);
 
     const rightGap = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft;
+    showStartButton = windowStartOffset > earliestTimelineOffset() || scroller.scrollLeft > 2;
     showTodayButton = windowEndOffset < 0 || rightGap > 2;
   }
 
   async function prependTimelineDays(count: number, metrics: { dayWidth: number; habitWidth: number }) {
     if (!scroller || count <= 0) return;
+    const earliest = earliestTimelineOffset();
+    const nextStart = Math.max(earliest, windowStartOffset - count);
+    const inserted = windowStartOffset - nextStart;
+    if (inserted <= 0) return;
     const beforeScrollLeft = scroller.scrollLeft;
-    windowStartOffset -= count;
+    windowStartOffset = nextStart;
     await tick();
 
-    const compensation = count * metrics.dayWidth;
+    const compensation = inserted * metrics.dayWidth;
     scroller.scrollLeft = beforeScrollLeft + compensation;
     if (timelinePanPointerId !== null) timelinePanStartScrollLeft += compensation;
     if (timelineTouchId !== null) timelineTouchStartScrollLeft += compensation;
@@ -578,7 +609,7 @@
     const threshold = metrics.dayWidth * 6;
     const rightGap = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft;
 
-    if (scroller.scrollLeft < threshold && dates.length) {
+    if (scroller.scrollLeft < threshold && dates.length && windowStartOffset > earliestTimelineOffset()) {
       shiftingWindow = true;
       try {
         await prependTimelineDays(WINDOW_SHIFT, metrics);
@@ -686,11 +717,10 @@
     timelineTouchAxis = '';
   }
 
-  async function switchView(next: 'habits' | 'thoughts' | 'stats') {
+  async function switchView(next: 'habits' | 'thoughts') {
     if (next === view) return;
     if (view === 'habits' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
     view = next;
-    monthMenuOpen = false;
     await tick();
     if (next === 'habits' && scroller) {
       scroller.scrollLeft = savedHabitScrollLeft;
@@ -700,145 +730,37 @@
     }
   }
 
-  function statWindow(habit: Habit, startOffset: number, count: number) {
-    let eligible = 0;
-    let successes = 0;
-    const start = habitStartKey(habit) || enrolledKey;
-
-    for (let i = 0; i < count; i += 1) {
-      const key = dateKey(shiftedDate(currentDay, startOffset - i));
-      const value = valueFor(habit.id, key);
-      const existed = !start || key >= start;
-      if (!existed && value === 0) continue;
-      eligible += 1;
-      if (value > 0) successes += 1;
-    }
-
-    return {
-      eligible,
-      percent: eligible ? Math.round((successes / eligible) * 100) : null
-    };
-  }
-
-  function currentStreak(habit: Habit) {
-    const start = habitStartKey(habit) || enrolledKey;
-    let offset = valueFor(habit.id, todayKey) > 0 ? 0 : -1;
-    let streak = 0;
-
-    while (offset > -3660) {
-      const key = dateKey(shiftedDate(currentDay, offset));
-      const value = valueFor(habit.id, key);
-      if (start && key < start && value === 0) break;
-      if (value <= 0) break;
-      streak += 1;
-      offset -= 1;
-    }
-
-    return streak;
-  }
-
-  function statsFor(habit: Habit) {
-    // Percentages use completed days only so an unfinished today never lowers the score.
-    return {
-      seven: statWindow(habit, -1, 7),
-      thirty: statWindow(habit, -1, 30),
-      streak: currentStreak(habit)
-    };
-  }
-
-  function visibleYear() {
-    return displayYear;
-  }
-
-  function visibleMonth() {
-    return displayMonthIndex + 1;
-  }
-
-  function toggleMonthMenu() {
-    monthMenuOpen = !monthMenuOpen;
-  }
-
-  function chooseMonth(month: number) {
-    if (!Number.isInteger(month) || month < 1 || month > 12) return;
-    monthMenuOpen = false;
-
-    const year = visibleYear();
-    const currentYear = currentDay.getFullYear();
-    const currentMonth = currentDay.getMonth() + 1;
-    if (year > currentYear || (year === currentYear && month > currentMonth)) {
-      void scrollToToday();
-      return;
-    }
-    const value = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
-    setVisibleMonthState(year, month);
-    void jumpToMonth(value);
-  }
-
-  function commitYearInput(input: HTMLInputElement) {
-    const requested = Number(input.value.trim());
-    const currentYear = currentDay.getFullYear();
-    if (!Number.isInteger(requested) || requested < 2000) {
-      input.value = String(displayYear);
-      return;
-    }
-
-    const year = Math.min(requested, currentYear);
-    let month = visibleMonth();
-    if (year === currentYear && month > currentDay.getMonth() + 1) month = currentDay.getMonth() + 1;
-    setVisibleMonthState(year, month);
-    input.value = String(year);
-    void jumpToMonth(`${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`);
-  }
-
-  async function jumpToMonth(value: string) {
-    if (!scroller || !/^\d{4}-\d{2}$/.test(value)) return;
-    const [yearText, monthText] = value.split('-');
-    const year = Number(yearText);
-    const month = Number(monthText);
-    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return;
-
-    const today = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate(), 12);
-    const target = new Date(year, month - 1, 1, 12);
-    const currentMonth = new Date(today.getFullYear(), today.getMonth(), 1, 12);
-    if (target > currentMonth) {
-      await scrollToToday();
-      return;
-    }
-
-    const metrics = timelineMetrics();
-    if (!metrics || metrics.dayWidth <= 0) return;
-    const timelineWidth = Math.max(metrics.dayWidth, scroller.clientWidth - metrics.habitWidth);
-    const visibleDays = Math.max(1, Math.floor(timelineWidth / metrics.dayWidth));
-    const targetOffset = calendarDayDistance(today, target);
+  async function scrollToStart() {
+    const earliest = earliestTimelineOffset();
     const requiredDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
-    windowStartOffset = targetOffset - WINDOW_SHIFT;
-    windowEndOffset = Math.min(0, Math.max(targetOffset + visibleDays + WINDOW_SHIFT - 1, windowStartOffset + requiredDays - 1));
+    windowStartOffset = earliest;
+    windowEndOffset = Math.min(0, earliest + requiredDays - 1);
     await tick();
-
-    const targetKey = dateKey(target);
-    const targetIndex = dates.findIndex((date) => date.key === targetKey);
-    if (targetIndex >= 0) scroller.scrollLeft = targetIndex * metrics.dayWidth;
-    else scroller.scrollLeft = 0;
-
-    updateTimelineStatus();
-    setVisibleMonthState(year, month);
+    if (scroller) {
+      scroller.scrollLeft = 0;
+      updateTimelineStatus();
+    }
   }
 
   async function scrollToToday() {
     windowEndOffset = 0;
     updateMinimumVisibleDays();
-    windowStartOffset = -(Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT) - 1);
+    windowStartOffset = Math.max(
+      earliestTimelineOffset(),
+      -(Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT) - 1)
+    );
     await tick();
     if (scroller) {
       scroller.scrollLeft = scroller.scrollWidth;
       updateTimelineStatus();
+      setVisibleMonthState(currentDay.getFullYear(), currentDay.getMonth() + 1);
     }
   }
 
   function loadQrModule() { qrModulePromise ??= import('qrcode'); return qrModulePromise; }
 
   async function ensureRecoveryCode() {
-    if (!credentials || credentials.recoveryCode || !navigator.onLine) return;
+    if (fixtureMode || !credentials || credentials.recoveryCode || !navigator.onLine) return;
     if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
     const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}/recovery`, { method: 'POST', headers: authHeaders(credentials) });
     if (!response.ok) throw new Error(await response.text());
@@ -875,6 +797,7 @@
     if (!board) return;
     const next = normalizeHabits(habits);
     board = { ...board, habits: next };
+    if (fixtureMode) return;
     pendingHabitSave = next;
     setHabitsDirty(true);
     schedulePersistence();
@@ -887,6 +810,7 @@
   }
 
   async function flushHabitChanges() {
+    if (fixtureMode) return;
     if (habitFlushPromise) return habitFlushPromise;
     if (!credentials || !navigator.onLine || !pendingHabitSave) return;
     if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
@@ -932,6 +856,7 @@
     if (!board) return;
     const next = normalizeThoughts(thoughts);
     board = { ...board, thoughts: next };
+    if (fixtureMode) return;
     pendingThoughtSave = next;
     setThoughtsDirty(true);
     schedulePersistence();
@@ -944,6 +869,7 @@
   }
 
   async function flushThoughtChanges() {
+    if (fixtureMode) return;
     if (thoughtFlushPromise) return thoughtFlushPromise;
     if (!credentials || !navigator.onLine || !pendingThoughtSave) return;
     if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
@@ -1330,7 +1256,7 @@
       panel = 'archived';
       void fetchBoard().catch(() => {});
     } catch (error) {
-      archiveError = error instanceof Error ? error.message : 'could not delete · retry';
+      archiveError = error instanceof Error ? error.message : 'could not delete; retry';
     } finally {
       deletingHabit = false;
     }
@@ -1351,7 +1277,7 @@
       for (const [key, entry] of entries) if (archivedIds.has(entry.habitId)) entries.delete(key);
       board = { ...board, archivedHabits: [], entries: [] };
       schedulePersistence(); panel = 'archived'; void fetchBoard().catch(() => {});
-    } catch (error) { archiveError = error instanceof Error ? error.message : 'could not clear archive · retry'; }
+    } catch (error) { archiveError = error instanceof Error ? error.message : 'could not clear archive; retry'; }
     finally { clearingArchive = false; }
   }
 
@@ -1498,11 +1424,16 @@
   function scheduleSyncLoop() {
     if (syncTimer) clearTimeout(syncTimer);
     syncTimer = undefined;
-    if (document.visibilityState !== 'visible') return;
+    if (fixtureMode || document.visibilityState !== 'visible') return;
     syncTimer = setTimeout(async () => { await sync(); scheduleSyncLoop(); }, 8000);
   }
 
   async function initialize() {
+    if (fixtureMode) {
+      online = true;
+      if (board) await scrollToToday();
+      return;
+    }
     online = navigator.onLine;
     if (!credentials) resetToFreshLocalBoard();
     if (!board && credentials && navigator.onLine) { try { await fetchBoard(); } catch { online = navigator.onLine; } }
@@ -1513,9 +1444,11 @@
   onMount(() => {
     theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
     void initialize();
-    const prewarmQr = () => void loadQrModule();
-    if ((window as any).requestIdleCallback) (window as any).requestIdleCallback(prewarmQr, { timeout: 2500 });
-    else setTimeout(prewarmQr, 1200);
+    if (!fixtureMode) {
+      const prewarmQr = () => void loadQrModule();
+      if ((window as any).requestIdleCallback) (window as any).requestIdleCallback(prewarmQr, { timeout: 2500 });
+      else setTimeout(prewarmQr, 1200);
+    }
 
     const onFocus = () => void sync();
     const onOnline = () => credentials ? void sync() : void initialize();
@@ -1524,7 +1457,6 @@
     const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
     const onDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (monthMenuOpen && !target?.closest('.month-control')) monthMenuOpen = false;
       if (navMenuOpen && !target?.closest('.nav-actions')) navMenuOpen = false;
     };
     const onResize = () => {
@@ -1535,10 +1467,12 @@
       if (minimumVisibleDays > previousMinimum && currentDays < requiredDays && scroller) {
         const add = requiredDays - currentDays;
         const beforeScrollLeft = scroller.scrollLeft;
-        windowStartOffset -= add;
+        const nextStart = Math.max(earliestTimelineOffset(), windowStartOffset - add);
+        const inserted = windowStartOffset - nextStart;
+        windowStartOffset = nextStart;
         void tick().then(() => {
           if (!scroller) return;
-          scroller.scrollLeft = beforeScrollLeft + add * DAY_SIZE;
+          scroller.scrollLeft = beforeScrollLeft + inserted * DAY_SIZE;
           updateTimelineStatus();
         });
         return;
@@ -1600,7 +1534,7 @@
 </script>
 
 <svelte:head>
-  <title>3tap</title>
+  <title>{fixtureMode && requestedFixture ? `3tap · ${requestedFixture} fixture` : '3tap'}</title>
   <meta name="description" content="A tiny three-state daily habit grid." />
 </svelte:head>
 
@@ -1639,9 +1573,8 @@
       <div
         class="grid-scroll"
         class:thoughts-mode={view === 'thoughts'}
-        class:stats-mode={view === 'stats'}
         role="region"
-        aria-label={view === 'habits' ? 'Habit timeline' : view === 'thoughts' ? 'Thoughts' : 'Stats'}
+        aria-label={view === 'habits' ? 'Habit timeline' : 'Thoughts'}
         bind:this={scroller}
         onscroll={onTimelineScroll}
         onpointerdown={startTimelinePan}
@@ -1652,7 +1585,22 @@
         <div class="grid-frame">
           <div class="timeline-header" aria-label="Timeline">
             <div class="timeline-side">
-              <nav class="timeline-controls" aria-label="App controls">
+              <nav class="timeline-controls" aria-label="Pages">
+                <button
+                  class="tool-icon habits-tool"
+                  class:active={view === 'habits'}
+                  aria-label="Habits"
+                  aria-pressed={view === 'habits'}
+                  title="Habits"
+                  onclick={() => void switchView('habits')}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="4" y="4" width="6" height="6"></rect>
+                    <rect x="14" y="4" width="6" height="6"></rect>
+                    <rect x="4" y="14" width="6" height="6"></rect>
+                    <rect x="14" y="14" width="6" height="6"></rect>
+                  </svg>
+                </button>
                 <button
                   class="tool-icon thoughts-tool"
                   class:active={view === 'thoughts'}
@@ -1661,26 +1609,10 @@
                   title="Thoughts"
                   onclick={() => void switchView('thoughts')}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path>
-                  </svg>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
                 </button>
                 <button
-                  class="tool-icon stats-tool"
-                  class:active={view === 'stats'}
-                  aria-label="Stats"
-                  aria-pressed={view === 'stats'}
-                  title="Stats"
-                  onclick={() => void switchView('stats')}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M6 19V13"></path>
-                    <path d="M12 19V9"></path>
-                    <path d="M18 19V5"></path>
-                  </svg>
-                </button>
-                <button
-                  class="tool-icon theme-toggle"
+                  class="tool-icon theme-tool"
                   aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
                   title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
                   onclick={toggleTheme}
@@ -1688,14 +1620,10 @@
                   {#if theme === 'dark'}
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
-                      <path d="M12 2v2"></path>
-                      <path d="M12 20v2"></path>
-                      <path d="m4.93 4.93 1.41 1.41"></path>
-                      <path d="m17.66 17.66 1.41 1.41"></path>
-                      <path d="M2 12h2"></path>
-                      <path d="M20 12h2"></path>
-                      <path d="m6.34 17.66-1.41 1.41"></path>
-                      <path d="m19.07 4.93-1.41 1.41"></path>
+                      <path d="M12 2v2"></path><path d="M12 20v2"></path>
+                      <path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path>
+                      <path d="M2 12h2"></path><path d="M20 12h2"></path>
+                      <path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path>
                     </svg>
                   {:else}
                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1708,49 +1636,17 @@
             {#if view === 'habits'}
             <div class="timeline-main-header">
               <div class="timeline-meta-row">
-                <div class="month-slot" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
-                  <div class="month-control">
-                    <button
-                      class="month-button"
-                      aria-label={`Change month. Currently ${monthOptions[displayMonthIndex]}`}
-                      aria-haspopup="true"
-                      aria-expanded={monthMenuOpen}
-                      onclick={toggleMonthMenu}
-                    >{monthOptions[displayMonthIndex]}</button>
-                    {#if monthMenuOpen}
-                      <div class="date-menu month-menu" aria-label="Choose month">
-                        {#each monthOptions as monthName, index}
-                          <button
-                            class="date-option"
-                            class:selected={displayMonthIndex === index}
-                            aria-pressed={displayMonthIndex === index}
-                            onclick={() => chooseMonth(index + 1)}
-                          >{monthName}</button>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="year-control">
-                    <input
-                      class="year-input"
-                      aria-label={`Jump to year. Currently ${displayYear}`}
-                      inputmode="numeric"
-                      pattern="[0-9]*"
-                      value={displayYear}
-                      onfocus={(event) => event.currentTarget.select()}
-                      onclick={(event) => event.currentTarget.select()}
-                      onkeydown={(event) => {
-                        if (event.key !== 'Enter') return;
-                        event.preventDefault();
-                        commitYearInput(event.currentTarget);
-                        event.currentTarget.blur();
-                      }}
-                      onblur={(event) => commitYearInput(event.currentTarget)}
-                    />
-                  </div>
-                </div>
-                <div class="timeline-meta-fill">
+                <div class="start-slot">
+                  {#if showStartButton}
+                    <button class="nav-start" aria-label="Jump to start" onclick={scrollToStart}>← start</button>
+                  {/if}
                   {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+                </div>
+                <div class="month-nav" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
+                  <div class="month-slot" aria-hidden="true">
+                    <span class="month-label">{monthOptions[displayMonthIndex]}</span>
+                    <span class="year-label">{displayYear}</span>
+                  </div>
                 </div>
                 <div class="today-slot">
                   {#if showTodayButton}
@@ -1775,14 +1671,7 @@
             </div>
             {:else if view === 'thoughts'}
               <div class="thoughts-header">
-                <span>thoughts</span>
                 {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
-              </div>
-            {:else}
-              <div class="stats-header" aria-label="Stats columns">
-                <div class="stats-head-cell">7d</div>
-                <div class="stats-head-cell">30d</div>
-                <div class="stats-head-cell">streak</div>
               </div>
             {/if}
           </div>
@@ -1845,28 +1734,6 @@
                 {/if}
               </div>
             </div>
-          {:else if view === 'stats'}
-            {#if board.habits.length === 0}
-              <div class="stats-empty">stats appear after you add a habit</div>
-            {:else}
-              <div class="stats-grid" aria-label="Habit stats">
-                {#each board.habits as habit (habit.id)}
-                  {@const stat = statsFor(habit)}
-                  <div class="stats-row">
-                    <div class="stats-habit" title={habit.name}>{habit.name}</div>
-                    <div class="stats-cell" aria-label={`${habit.name}, last 7 completed days: ${stat.seven.percent ?? 'not enough data'} percent`}>
-                      {stat.seven.percent === null ? '—' : `${stat.seven.percent}%`}
-                    </div>
-                    <div class="stats-cell" aria-label={`${habit.name}, last 30 completed days: ${stat.thirty.percent ?? 'not enough data'} percent`}>
-                      {stat.thirty.percent === null ? '—' : `${stat.thirty.percent}%`}
-                    </div>
-                    <div class="stats-cell stats-streak" aria-label={`${habit.name}, current streak: ${stat.streak} days`}>
-                      {stat.streak}d
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
           {:else if board.habits.length === 0}
             <div class="zero-add-row">
               <div class="zero-add-cell">
@@ -1886,6 +1753,11 @@
                 {:else}
                   <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
                 {/if}
+              </div>
+              <div class="zero-add-days" aria-hidden="true">
+                {#each dates as date (date.key)}
+                  <div class="zero-add-day"></div>
+                {/each}
               </div>
             </div>
           {:else}
@@ -1954,14 +1826,14 @@
                       class="cell"
                       disabled={!editable}
                       aria-label={prestart
-                        ? `${habit.name}, ${date.key}: before this habit existed`
+                        ? `${habit.name}, ${date.key}: unavailable`
                         : `${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', locked'}`}
                       onpointerdown={(event) => {
                         if (event.button === 0) tapCell(habit.id, date.key, event.currentTarget);
                       }}
                       onclick={(event) => {
                         if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}>{prestart ? '·' : symbols[value]}</button>
+                      }}>{prestart ? '' : symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
@@ -1985,14 +1857,9 @@
                   <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
                 {/if}
               </th>
-              <td class="add-spacer" colspan={dates.length}>
-                <div class="state-legend" aria-label="Habit mark legend">
-                  <span><b>·</b> before</span>
-                  <span><b>-</b> missed</span>
-                  <span><b>|</b> done</span>
-                  <span><b>+</b> great</span>
-                </div>
-              </td>
+              {#each dates as date (date.key)}
+                <td class="add-spacer"></td>
+              {/each}
             </tr>
           </tbody>
         </table>
@@ -2004,11 +1871,8 @@
           <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
           <ul class="zero-tutorial-list">
             <li>tap today or yesterday: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
-            <li>older days lock; <b>·</b> means before the habit existed</li>
+            <li>older days lock</li>
             <li>tap a habit name to rename; drag it to reorder</li>
-            <li>swipe/drag sideways for history; tap month/year to jump</li>
-            <li>thought bubble opens scratchpad; moon/sun changes theme</li>
-            <li>••• opens access and archive</li>
           </ul>
         </section>
       {/if}
@@ -2196,8 +2060,9 @@
     --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
     --nav-shadow: rgba(17,17,15,.08);
-    --icon-thoughts: #225866;
-    --icon-archive: #af4b53;
+    --icon-habits: #225866;
+    --icon-thoughts: #af4b53;
+        --icon-archive: #af4b53;
     --icon-theme: #ca9503;
     --danger: #9b332b;
     background: var(--bg);
@@ -2226,8 +2091,9 @@
     --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
     --nav-shadow: rgba(0,0,0,.28);
-    --icon-thoughts: #225866;
-    --icon-archive: #af4b53;
+    --icon-habits: #225866;
+    --icon-thoughts: #af4b53;
+        --icon-archive: #af4b53;
     --icon-theme: #ca9503;
     --danger: #e58d82;
     color-scheme: dark;
@@ -2285,7 +2151,8 @@
     box-sizing: border-box;
     display: flex;
     align-items: center;
-    padding-left: var(--page-inset);
+    justify-content: flex-start;
+    padding: 0 8px 0 var(--page-inset);
     color: var(--muted);
     font-size: 11px;
     letter-spacing: .08em;
@@ -2351,41 +2218,43 @@
     text-align: left;
   }
   .nav-menu button:last-child { border-bottom: 0; }
+  .start-slot,
+  .month-nav,
   .month-slot,
-  .timeline-meta-fill,
   .today-slot {
     min-width: 0;
     height: var(--timeline-meta-height);
     display: flex;
     align-items: center;
   }
-  .month-slot {
-    position: relative;
-    width: 100%;
-    box-sizing: border-box;
+  .start-slot {
     justify-content: flex-start;
-    gap: 0;
+    gap: 8px;
     padding-left: 8px;
-    overflow: visible;
+  }
+  .today-slot { justify-content: flex-end; padding-right: 8px; }
+  .month-nav {
+    justify-content: center;
     color: var(--text);
     font-size: 11px;
-    letter-spacing: 0;
-    text-align: left;
     white-space: nowrap;
   }
-  .timeline-meta-fill { justify-content: flex-end; padding-right: 8px; }
-  .today-slot { justify-content: flex-end; padding-right: 8px; }
-  .offline { font-size: 10px; opacity: .45; white-space: nowrap; }
+  .month-slot {
+    position: relative;
+    justify-content: center;
+    gap: 0;
+    overflow: visible;
+    letter-spacing: 0;
+  }
+  .offline { font-size: 9px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
-  .month-button,
-  .year-input,
+  .nav-start,
   .nav-today {
     height: auto;
     min-height: 0;
     border: 0;
     border-bottom: 1px solid transparent;
     border-radius: 0;
-    padding: 2px 0 3px;
     background: transparent;
     color: var(--control-text);
     font: inherit;
@@ -2394,75 +2263,21 @@
     opacity: 1;
     white-space: nowrap;
   }
-  .month-control,
-  .year-control {
-    position: relative;
-    flex: none;
-  }
-  .month-control { width: 34px; }
-  .year-control { width: 36px; }
-  .month-button {
-    width: 34px;
-    text-align: center;
-  }
-  .year-input {
-    width: 36px;
-    box-sizing: border-box;
-    border: 0;
-    border-bottom: 1px solid transparent;
-    border-radius: 0;
-    outline: 0;
-    padding: 2px 0 3px;
-    background: transparent;
+  .nav-start,
+  .nav-today { padding: 2px 0 3px; }
+  .month-label,
+  .year-label {
+    display: inline-block;
     color: var(--control-text);
-    font: inherit;
     font-size: 11px;
     line-height: 1;
     text-align: center;
-    appearance: textfield;
-    cursor: pointer;
   }
-  .year-input::-webkit-outer-spin-button,
-  .year-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-  .nav-today { width: auto; text-align: right; }
-  .date-menu {
-    position: fixed;
-    z-index: 80;
-    top: calc(env(safe-area-inset-top) + var(--day-size) + var(--timeline-meta-height));
-    width: 34px;
-    box-sizing: border-box;
-    background: var(--bg);
-    border: var(--line) solid var(--grid);
-  }
-  .month-menu {
-    left: calc(var(--habit-width) + 8px);
-    max-height: none;
-    overflow: visible;
-  }
-  .date-option {
-    width: 100%;
-    height: 20px;
-    display: grid;
-    place-items: center;
-    border-bottom: var(--line) solid var(--grid);
-    background: var(--bg);
-    color: var(--control-text);
-    font-size: 10px;
-    line-height: 1;
-    text-align: center;
-  }
-  .date-option:last-child { border-bottom: 0; }
-  .date-option.selected {
-    background: var(--today-fill);
-    color: var(--control-active);
-  }
-  .date-option:focus-visible {
-    outline: 1px solid var(--control-active);
-    outline-offset: -2px;
-    color: var(--control-active);
-  }
-  .month-button:focus-visible,
-  .year-input:focus-visible,
+  .month-label { width: 26px; }
+  .year-label { width: 32px; }
+  .nav-start { text-align: left; }
+  .nav-today { text-align: right; }
+  .nav-start:focus-visible,
   .nav-today:focus-visible {
     outline: none;
     color: var(--control-active);
@@ -2475,13 +2290,12 @@
     :global(html:not(.item-dragging-cursor)) .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
     :global(html:not(.item-dragging-cursor)) .panel-button-danger:not(:disabled):hover { color: var(--danger); }
     :global(html:not(.item-dragging-cursor)) .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
-    :global(html:not(.item-dragging-cursor)) .month-button:hover,
-    :global(html:not(.item-dragging-cursor)) .year-input:hover,
+    :global(html:not(.item-dragging-cursor)) .nav-start:hover,
     :global(html:not(.item-dragging-cursor)) .nav-today:hover {
       color: var(--control-active);
-      border-bottom-color: var(--control-active);
+      border-bottom-color: transparent;
+      text-decoration: underline;
     }
-    :global(html:not(.item-dragging-cursor)) .date-option:hover { background: var(--hover); color: var(--control-active); }
     :global(html:not(.item-dragging-cursor)) .habit-controls button:not(:disabled):hover,
     :global(html:not(.item-dragging-cursor)) .thought-controls button:not(:disabled):hover { opacity: 1; }
     :global(html:not(.item-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
@@ -2503,15 +2317,12 @@
     scroll-behavior: auto;
   }
   .grid-scroll::-webkit-scrollbar { display: none; }
-  .grid-scroll.thoughts-mode,
-  .grid-scroll.stats-mode {
+  .grid-scroll.thoughts-mode {
     overflow-x: hidden;
     cursor: default;
   }
   .grid-scroll.thoughts-mode .grid-frame,
-  .grid-scroll.thoughts-mode .timeline-header,
-  .grid-scroll.stats-mode .grid-frame,
-  .grid-scroll.stats-mode .timeline-header {
+  .grid-scroll.thoughts-mode .timeline-header {
     width: 100%;
     min-width: 100%;
   }
@@ -2577,11 +2388,11 @@
     pointer-events: none;
     transition: opacity 110ms ease;
   }
+  .habits-tool { color: var(--icon-habits); }
+  .habits-tool.active::before { opacity: .10; }
   .thoughts-tool { color: var(--icon-thoughts); }
   .thoughts-tool.active::before { opacity: .10; }
-  .stats-tool { color: var(--icon-archive); }
-  .stats-tool.active::before { opacity: .10; }
-  .theme-toggle { color: var(--icon-theme); }
+  .theme-tool { color: var(--icon-theme); }
   .tool-icon svg {
     position: relative;
     z-index: 1;
@@ -2613,26 +2424,9 @@
     padding: 0 var(--page-inset);
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-end;
     color: var(--control-text);
     font-size: 11px;
-  }
-  .stats-header {
-    flex: 1;
-    min-width: 0;
-    height: var(--day-size);
-    display: grid;
-    grid-template-columns: repeat(3, var(--day-size));
-    align-items: stretch;
-    color: var(--muted);
-    font-size: 9px;
-    text-transform: lowercase;
-  }
-  .stats-head-cell {
-    height: var(--day-size);
-    display: grid;
-    place-items: center;
-    border-right: var(--line) solid var(--grid);
   }
   .timeline-meta-row {
     position: sticky;
@@ -2641,12 +2435,16 @@
     width: calc(100vw - var(--habit-width));
     height: var(--timeline-meta-height);
     display: grid;
-    grid-template-columns: calc(var(--day-size) * 2.25) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
     box-sizing: border-box;
     margin-bottom: calc(-1 * var(--timeline-meta-height));
     background: transparent;
+    pointer-events: none;
   }
+  .start-slot,
+  .month-nav,
+  .today-slot { pointer-events: auto; }
 
   .day-head-strip {
     position: relative;
@@ -2681,6 +2479,7 @@
     background: var(--grid);
     pointer-events: none;
   }
+  .day-head:first-child::before { display: none; }
   .day-head span,
   .day-head strong {
     display: block;
@@ -2824,53 +2623,6 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     pointer-events: none;
     will-change: top;
   }
-  .stats-grid {
-    width: max-content;
-    min-width: calc(var(--habit-width) + (var(--day-size) * 3));
-    background: var(--bg);
-  }
-  .stats-row {
-    height: var(--day-size);
-    display: grid;
-    grid-template-columns: var(--habit-width) repeat(3, var(--day-size));
-    border-bottom: var(--line) solid var(--grid);
-  }
-  .stats-habit {
-    min-width: 0;
-    height: var(--day-size);
-    padding: 0 8px 0 var(--page-inset);
-    display: flex;
-    align-items: center;
-    overflow: hidden;
-    border-right: var(--line) solid var(--grid);
-    color: var(--text);
-    font-size: 12px;
-    font-weight: 500;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .stats-cell {
-    width: var(--day-size);
-    height: var(--day-size);
-    display: grid;
-    place-items: center;
-    border-right: var(--line) solid var(--grid);
-    color: var(--timeline-text);
-    font-size: 11px;
-    line-height: 1;
-  }
-  .stats-streak {
-    color: var(--timeline-mark);
-    font-weight: 600;
-  }
-  .stats-empty {
-    height: var(--day-size);
-    padding-left: var(--page-inset);
-    display: flex;
-    align-items: center;
-    color: var(--muted);
-    font-size: 11px;
-  }
   .thoughts-grid {
     width: 100%;
     background: var(--bg);
@@ -2953,13 +2705,27 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     font-size: 12px;
   }
   .zero-add-row {
-    width: 100%;
+    width: max-content;
+    min-width: 100%;
     height: var(--day-size);
+    display: flex;
+    align-items: stretch;
     touch-action: pan-y;
     cursor: default;
   }
   .zero-add-row * { touch-action: pan-y; }
   .zero-add-row button { cursor: pointer; }
+  .zero-add-days {
+    display: flex;
+    width: max-content;
+    height: var(--day-size);
+  }
+  .zero-add-day {
+    width: var(--day-size);
+    min-width: var(--day-size);
+    max-width: var(--day-size);
+    height: var(--day-size);
+  }
   .zero-add-cell {
     position: sticky;
     left: 0;
@@ -3022,9 +2788,13 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     background: var(--bg);
   }
   .add-row .add-spacer {
+    width: var(--day-size);
+    min-width: var(--day-size);
+    max-width: var(--day-size);
     height: var(--day-size);
     border: 0;
     background: transparent;
+    vertical-align: top;
   }
   .add-row,
   .add-row * {
@@ -3032,36 +2802,6 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     cursor: default;
   }
   .add-row button { cursor: pointer; }
-  .state-legend {
-    position: sticky;
-    right: 0;
-    width: max-content;
-    height: var(--day-size);
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 14px;
-    padding: 0 var(--page-inset) 0 12px;
-    background: var(--bg);
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1;
-    white-space: nowrap;
-    opacity: .62;
-    pointer-events: none;
-  }
-  .state-legend span {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-    font-size: inherit;
-  }
-  .state-legend b {
-    color: var(--timeline-mark);
-    font-size: inherit;
-    font-weight: 500;
-  }
   .add-habit {
     width: 100%;
     height: 100%;
@@ -3088,10 +2828,6 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
     user-select: none;
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
-  }
-  td.prestart .cell {
-    font-size: 18px;
-    line-height: 1;
   }
   .cell.plus { font-weight: 750; font-size: 17px; }
   .cell:disabled { pointer-events: none; }

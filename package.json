@@ -9,7 +9,8 @@
     "deploy": "wrangler deploy",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "db:reset": "npx --yes supabase@latest db reset --local",
-    "db:stop": "npx --yes supabase@latest stop"
+    "db:stop": "npx --yes supabase@latest stop",
+    "site:zip": "node scripts/site-zip.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.112.3",
