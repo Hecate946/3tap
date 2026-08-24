@@ -1,0 +1,74 @@
+<script is:inline>
+  (() => {
+    const THEME_STORAGE_KEY = 'color-theme';
+    const themeNames = new Set(['light', 'dark']);
+    const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+    const readPreference = () => {
+      try {
+        const saved = localStorage.getItem(THEME_STORAGE_KEY);
+        return themeNames.has(saved) ? saved : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const resolveTheme = () => readPreference() ?? (darkModeQuery.matches ? 'dark' : 'light');
+
+    const updateThemeColor = (targetDocument = document, theme = resolveTheme()) => {
+      const meta = targetDocument.querySelector('meta[name="theme-color"]');
+      if (!meta) return;
+
+      const color = theme === 'dark' ? meta.dataset.dark : meta.dataset.light;
+      if (color) meta.setAttribute('content', color);
+    };
+
+    const applyTheme = (targetDocument = document) => {
+      const theme = resolveTheme();
+      const root = targetDocument.documentElement;
+      root.dataset.theme = theme;
+      root.dataset.themeReady = 'true';
+      root.style.colorScheme = theme;
+      updateThemeColor(targetDocument, theme);
+    };
+
+    applyTheme();
+    requestAnimationFrame(() => updateThemeColor());
+
+    if (!window.__cyrusThemeBootstrapInstalled) {
+      window.__cyrusThemeBootstrapInstalled = true;
+
+      document.addEventListener('astro:before-swap', (event) => {
+        applyTheme(event.newDocument);
+
+        // Tint iOS/browser chrome to the destination before Astro swaps the
+        // document, avoiding a frame where the old page color hangs around.
+        const incomingMeta = event.newDocument.querySelector('meta[name="theme-color"]');
+        const currentMeta = document.querySelector('meta[name="theme-color"]');
+        const incomingColor = incomingMeta?.getAttribute('content');
+        if (incomingColor && currentMeta) currentMeta.setAttribute('content', incomingColor);
+      });
+
+      document.addEventListener('astro:after-swap', () => {
+        applyTheme();
+      });
+
+      document.addEventListener('hecate:theme-change', () => {
+        applyTheme();
+      });
+
+      document.addEventListener(
+        'DOMContentLoaded',
+        () => {
+          applyTheme();
+        },
+        { once: true },
+      );
+
+      darkModeQuery.addEventListener('change', () => {
+        if (readPreference()) return;
+        applyTheme();
+      });
+    }
+  })();
+</script>

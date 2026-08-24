@@ -1,0 +1,223 @@
+---
+import { siteConfig } from '@/config/site';
+import { withBase } from '@/lib/paths';
+
+interface Props {
+  title?: string;
+  description?: string;
+  socialTitle?: string;
+  socialDescription?: string;
+  socialImage?: string;
+  socialImageAlt?: string;
+  socialImageWidth?: number;
+  socialImageHeight?: number;
+  canonicalURL?: URL;
+  noindex?: boolean;
+  structuredData?: Record<string, unknown> | readonly Record<string, unknown>[];
+}
+
+const {
+  title = 'Home',
+  description = siteConfig.description,
+  socialTitle,
+  socialDescription,
+  socialImage,
+  socialImageAlt,
+  socialImageWidth,
+  socialImageHeight,
+  canonicalURL = new URL(Astro.url.pathname, Astro.site),
+  noindex = false,
+  structuredData: additionalStructuredData,
+} = Astro.props;
+
+const normalizedPath = Astro.url.pathname.replace(/\/+$/, '') || '/';
+
+// Keep the mobile browser canvas/chrome explicit, as branch `t` did with
+// theme-color, while matching the current room palettes. ThemeBootstrap picks
+// the active value immediately for the user's saved light/dark preference.
+const browserChromeColors = normalizedPath === '/'
+  ? { light: '#52a4b9', dark: '#051417' }
+  : normalizedPath === '/about'
+    ? { light: '#d897b2', dark: '#380a12' }
+    : normalizedPath.startsWith('/projects')
+      ? { light: '#b6a6cc', dark: '#130a1f' }
+      : normalizedPath === '/resumes'
+        ? { light: '#dfa06f', dark: '#8f3510' }
+        : normalizedPath === '/contact'
+          ? { light: '#6d9e92', dark: '#041b0b' }
+          : { light: '#fff8e8', dark: '#07191d' };
+
+const isHomePage = normalizedPath === '/';
+const isAboutPage = normalizedPath === '/about';
+const isProjectsPage = normalizedPath === '/projects';
+const isResumesPage = normalizedPath === '/resumes';
+const isContactPage = normalizedPath === '/contact';
+const pageName = title.trim() || 'Home';
+const resolvedTitle = `${pageName} | ${siteConfig.name}`;
+const compactSocialTitle = socialTitle ?? (isHomePage ? siteConfig.name : pageName);
+const compactSocialDescription =
+  socialDescription ?? (isHomePage ? siteConfig.socialDescription : description);
+const canonicalHref = canonicalURL.toString();
+const siteUrl = new URL('/', Astro.site).toString();
+
+function inferImageType(path: string) {
+  const cleanPath = path.split(/[?#]/, 1)[0]?.toLowerCase() ?? '';
+  if (cleanPath.endsWith('.webp')) return 'image/webp';
+  if (cleanPath.endsWith('.png')) return 'image/png';
+  if (cleanPath.endsWith('.jpg') || cleanPath.endsWith('.jpeg')) return 'image/jpeg';
+  if (cleanPath.endsWith('.gif')) return 'image/gif';
+  return undefined;
+}
+
+const defaultSocialImagePath = withBase('/images/social/home.jpg');
+const resolvedImagePath = socialImage ?? defaultSocialImagePath;
+const resolvedImageAlt =
+  socialImageAlt ??
+  (isHomePage
+    ? `${siteConfig.name} portfolio room preview`
+    : `${pageName} on ${siteConfig.name}'s portfolio`);
+const resolvedImageWidth = socialImageWidth ?? 400;
+const resolvedImageHeight = socialImageHeight ?? 400;
+const resolvedImageType = inferImageType(resolvedImagePath);
+const socialImageUrl = new URL(resolvedImagePath, Astro.site).toString();
+
+const personId = `${siteUrl}#person`;
+const websiteId = `${siteUrl}#website`;
+const webPageId = `${canonicalHref}#webpage`;
+const portraitUrl = new URL(withBase('/images/about/cyrus-portrait-480.webp'), Astro.site).toString();
+
+const pageType = isAboutPage
+  ? 'ProfilePage'
+  : isProjectsPage || isResumesPage
+    ? 'CollectionPage'
+    : isContactPage
+      ? 'ContactPage'
+      : 'WebPage';
+
+const structuredImage = {
+  '@type': 'ImageObject',
+  url: socialImageUrl,
+  contentUrl: socialImageUrl,
+  caption: resolvedImageAlt,
+  width: resolvedImageWidth,
+  height: resolvedImageHeight,
+};
+
+const personStructuredData = {
+  '@type': 'Person',
+  '@id': personId,
+  name: siteConfig.name,
+  url: siteUrl,
+  image: portraitUrl,
+  jobTitle: 'Software Engineer and Classical Musician',
+  sameAs: [siteConfig.social.github, siteConfig.social.linkedin],
+};
+
+const pageStructuredData = {
+  '@type': pageType,
+  '@id': webPageId,
+  url: canonicalHref,
+  name: resolvedTitle,
+  description,
+  inLanguage: siteConfig.locale,
+  isPartOf: { '@id': websiteId },
+  author: { '@id': personId },
+  primaryImageOfPage: structuredImage,
+  ...(isAboutPage ? { mainEntity: { '@id': personId } } : {}),
+};
+
+const additionalGraph = additionalStructuredData
+  ? Array.isArray(additionalStructuredData)
+    ? additionalStructuredData
+    : [additionalStructuredData]
+  : [];
+
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    personStructuredData,
+    {
+      '@type': 'WebSite',
+      '@id': websiteId,
+      url: siteUrl,
+      name: siteConfig.name,
+      alternateName: 'hecate946.com',
+      description: siteConfig.description,
+      inLanguage: siteConfig.locale,
+      creator: { '@id': personId },
+    },
+    pageStructuredData,
+    ...additionalGraph,
+  ],
+};
+
+const structuredDataJson = JSON.stringify(structuredData).replace(/</g, '\\u003c');
+---
+
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content={description} />
+<meta name="author" content={siteConfig.name} />
+<meta name="application-name" content={siteConfig.name} />
+<meta name="apple-mobile-web-app-title" content={siteConfig.shortName} />
+<meta name="color-scheme" content="light dark" />
+<meta
+  name="theme-color"
+  content={browserChromeColors.light}
+  data-light={browserChromeColors.light}
+  data-dark={browserChromeColors.dark}
+/>
+<meta name="referrer" content="same-origin" />
+<meta name="format-detection" content="telephone=no" />
+<meta
+  name="robots"
+  content={noindex
+    ? 'noindex, nofollow'
+    : 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1'}
+/>
+<link rel="canonical" href={canonicalHref} />
+<link rel="sitemap" href={withBase('/sitemap-index.xml')} type="application/xml" />
+<link rel="manifest" href={`${withBase('/site.webmanifest')}?v=pig-20260813`} />
+<link rel="icon" href={`${withBase('/favicon.ico')}?v=pig-20260813`} sizes="any" />
+<link rel="icon" href={`${withBase('/favicon-48.png')}?v=pig-20260813`} type="image/png" sizes="48x48" />
+<link rel="icon" href={`${withBase('/favicon.png')}?v=pig-20260813`} type="image/png" sizes="512x512" />
+<link rel="apple-touch-icon" href={`${withBase('/apple-touch-icon.png')}?v=pig-20260813`} sizes="180x180" />
+<link rel="me" href={siteConfig.social.github} />
+<link rel="me" href={siteConfig.social.linkedin} />
+
+<!-- The display font is render-critical on every page. Warm both Google font
+     origins so the stylesheet and font file do not each pay a fresh DNS/TLS
+     setup cost; the stylesheet itself still sends no referrer. -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300..500&display=swap"
+  rel="stylesheet"
+  referrerpolicy="no-referrer"
+/>
+
+<title>{resolvedTitle}</title>
+
+<meta property="og:type" content={isAboutPage ? 'profile' : 'website'} />
+<meta property="og:site_name" content={siteConfig.name} />
+<meta property="og:locale" content={siteConfig.locale.replace('-', '_')} />
+<meta property="og:title" content={compactSocialTitle} />
+<meta property="og:description" content={compactSocialDescription} />
+<meta property="og:url" content={canonicalHref} />
+<meta property="og:image" content={socialImageUrl} />
+<meta property="og:image:secure_url" content={socialImageUrl} />
+<meta property="og:image:alt" content={resolvedImageAlt} />
+{resolvedImageType && <meta property="og:image:type" content={resolvedImageType} />}
+{resolvedImageWidth && <meta property="og:image:width" content={String(resolvedImageWidth)} />}
+{resolvedImageHeight && <meta property="og:image:height" content={String(resolvedImageHeight)} />}
+{isAboutPage && <meta property="profile:first_name" content="Cyrus" />}
+{isAboutPage && <meta property="profile:last_name" content="Asasi" />}
+
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content={compactSocialTitle} />
+<meta name="twitter:description" content={compactSocialDescription} />
+<meta name="twitter:image" content={socialImageUrl} />
+<meta name="twitter:image:alt" content={resolvedImageAlt} />
+
+<script is:inline type="application/ld+json" set:html={structuredDataJson}></script>

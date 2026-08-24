@@ -1,0 +1,59 @@
+/*
+ * The homepage is one full-viewport room. Home keeps the original palette in
+ * themes.css; this file owns only its viewport composition.
+ */
+body.wall-home-page {
+  /* On Home, the visible page background is the blue/black wall rather than
+     themes.css's old cream/teal document surface. */
+  --bg: var(--wall-dark);
+
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+  background: var(--wall-dark);
+
+  /* Home shares the site's white linework/text language without changing
+     its independent wall/floor palette from themes.css. */
+  --room-outline: #fff;
+  --wall-outline: var(--room-outline);
+  --room-nav-ink: var(--room-outline);
+  --room-label-ink: var(--room-outline);
+  --room-control-ink: var(--room-outline);
+  --header-accent: var(--room-outline);
+}
+
+@supports (height: 100svh) {
+  body.wall-home-page {
+    height: 100svh;
+    min-height: 100svh;
+  }
+}
+
+@supports (height: 100dvh) {
+  body.wall-home-page {
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+}
+
+
+body.wall-home-page .wall-home-main {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.wall-home-main > astro-island {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}

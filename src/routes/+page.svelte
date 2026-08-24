@@ -192,6 +192,7 @@
 
   $: dates = datesForWindow(currentDay, windowStartOffset, windowEndOffset);
   $: todayKey = dateKey(currentDay);
+  $: yesterdayKey = dateKey(shiftedDate(currentDay, -1));
   $: enrolledKey = enrollmentKey(board);
 
   function isPreEnrollment(date: string) {
@@ -199,7 +200,7 @@
   }
 
   function isEditableDate(date: string) {
-    return Boolean(enrolledKey && date >= enrolledKey && date === todayKey);
+    return Boolean(enrolledKey && date >= enrolledKey && (date === todayKey || date === yesterdayKey));
   }
 
   function habitStartKey(habit: Habit) {
@@ -1526,6 +1527,7 @@
                 <div
                   class="day-head"
                   class:today={date.key === todayKey}
+                  class:yesterday={date.key === yesterdayKey}
                   class:enrolled={date.key === enrolledKey}
                   class:prestart={isPreEnrollment(date.key)}
                 >
@@ -1609,9 +1611,10 @@
                 {#each dates as date (date.key)}
                   {@const value = valueFor(habit.id, date.key)}
                   {@const prestart = isPreEnrollment(date.key) || isBeforeHabitStart(habit, date.key)}
-                  {@const editable = isEditableDate(date.key)}
+                  {@const editable = isEditableDate(date.key) && !prestart}
                   <td
                     class:today={date.key === todayKey}
+                    class:yesterday={date.key === yesterdayKey}
                     class:enrolled={date.key === enrolledKey}
                     class:prestart={prestart}
                     class:locked={!editable && !prestart}
@@ -1669,9 +1672,12 @@
       {#if board.habits.length === 0}
         <section class="zero-tutorial" aria-label="Getting started">
           <ul class="zero-tutorial-list">
-            <li><strong>add a habit to start tracking</strong></li>
-            <li>tap today to cycle between <b>-</b> missed · <b>|</b> done · <b>+</b> great</li>
-            <li>past days stay locked</li>
+            <li><strong>+ habit</strong> to start</li>
+            <li>tap today or yesterday: <b>-</b> missed · <b>|</b> done · <b>+</b> great</li>
+            <li>older days lock · <b>·</b> = before the habit existed</li>
+            <li>tap a habit name to rename · drag it to reorder</li>
+            <li>swipe/drag sideways for history · month/year to jump</li>
+            <li>archive keeps history · phone pairs/recovers · moon/sun changes theme</li>
           </ul>
         </section>
       {/if}
@@ -1849,8 +1855,10 @@
     --hover: #e7e7e1;
     --timeline-text: #62635d;
     --timeline-mark: #555650;
-    --today-accent: #168b92;
-    --today-fill: rgba(22,139,146,.11);
+    --today-accent: #075f67;
+    --today-fill: rgba(7,95,103,.18);
+    --yesterday-accent: #875600;
+    --yesterday-fill: rgba(180,118,0,.17);
     --press-fill: rgba(17,17,15,.13);
     --selection-bg: #b8d7ff;
     --selection-text: #0b1b2b;
@@ -1879,6 +1887,8 @@
     --timeline-mark: #b2b9b8;
     --today-accent: #5ecbd0;
     --today-fill: rgba(94,203,208,.14);
+    --yesterday-accent: #efc95a;
+    --yesterday-fill: rgba(239,201,90,.15);
     --press-fill: rgba(255,255,248,.16);
     --selection-bg: #315f8f;
     --selection-text: #ffffff;
@@ -2225,6 +2235,12 @@
     color: var(--today-accent);
     opacity: 1;
   }
+  .day-head.yesterday { background: var(--yesterday-fill); }
+  .day-head.yesterday span,
+  .day-head.yesterday strong {
+    color: var(--yesterday-accent);
+    opacity: 1;
+  }
   table {
     border-collapse: separate;
     border-spacing: 0;
@@ -2476,6 +2492,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
   .today { background: var(--today-fill); }
+  .yesterday { background: var(--yesterday-fill); }
 tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   td.prestart { background: transparent; }
   td.locked .cell,
@@ -2500,6 +2517,10 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   .cell:disabled { pointer-events: none; }
   td.today .cell {
     color: var(--today-accent);
+    opacity: 1;
+  }
+  td.yesterday .cell {
+    color: var(--yesterday-accent);
     opacity: 1;
   }
   .cell:not(:disabled):active { background: var(--press-fill); }
