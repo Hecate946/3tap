@@ -41,7 +41,7 @@
   }
   let online = true;
   let theme: 'light' | 'dark' = 'light';
-  let view: 'habits' | 'thoughts' = 'habits';
+  let view: 'habits' | 'thoughts' | 'stats' = 'habits';
   let navScrolled = false;
   let navMenuOpen = false;
   let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
@@ -686,7 +686,7 @@
     timelineTouchAxis = '';
   }
 
-  async function switchView(next: 'habits' | 'thoughts') {
+  async function switchView(next: 'habits' | 'thoughts' | 'stats') {
     if (next === view) return;
     if (view === 'habits' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
     view = next;
@@ -695,7 +695,55 @@
     if (next === 'habits' && scroller) {
       scroller.scrollLeft = savedHabitScrollLeft;
       updateTimelineStatus();
+    } else if (scroller) {
+      scroller.scrollLeft = 0;
     }
+  }
+
+  function statWindow(habit: Habit, startOffset: number, count: number) {
+    let eligible = 0;
+    let successes = 0;
+    const start = habitStartKey(habit) || enrolledKey;
+
+    for (let i = 0; i < count; i += 1) {
+      const key = dateKey(shiftedDate(currentDay, startOffset - i));
+      const value = valueFor(habit.id, key);
+      const existed = !start || key >= start;
+      if (!existed && value === 0) continue;
+      eligible += 1;
+      if (value > 0) successes += 1;
+    }
+
+    return {
+      eligible,
+      percent: eligible ? Math.round((successes / eligible) * 100) : null
+    };
+  }
+
+  function currentStreak(habit: Habit) {
+    const start = habitStartKey(habit) || enrolledKey;
+    let offset = valueFor(habit.id, todayKey) > 0 ? 0 : -1;
+    let streak = 0;
+
+    while (offset > -3660) {
+      const key = dateKey(shiftedDate(currentDay, offset));
+      const value = valueFor(habit.id, key);
+      if (start && key < start && value === 0) break;
+      if (value <= 0) break;
+      streak += 1;
+      offset -= 1;
+    }
+
+    return streak;
+  }
+
+  function statsFor(habit: Habit) {
+    // Percentages use completed days only so an unfinished today never lowers the score.
+    return {
+      seven: statWindow(habit, -1, 7),
+      thirty: statWindow(habit, -1, 30),
+      streak: currentStreak(habit)
+    };
   }
 
   function visibleYear() {
@@ -1591,8 +1639,9 @@
       <div
         class="grid-scroll"
         class:thoughts-mode={view === 'thoughts'}
+        class:stats-mode={view === 'stats'}
         role="region"
-        aria-label={view === 'habits' ? 'Habit timeline' : 'Thoughts'}
+        aria-label={view === 'habits' ? 'Habit timeline' : view === 'thoughts' ? 'Thoughts' : 'Stats'}
         bind:this={scroller}
         onscroll={onTimelineScroll}
         onpointerdown={startTimelinePan}
@@ -1607,24 +1656,29 @@
                 <button
                   class="tool-icon thoughts-tool"
                   class:active={view === 'thoughts'}
-                  aria-label={view === 'thoughts' ? 'Back to habits' : 'Thoughts'}
-                  title={view === 'thoughts' ? 'Habits' : 'Thoughts'}
-                  onclick={() => void switchView(view === 'thoughts' ? 'habits' : 'thoughts')}
+                  aria-label="Thoughts"
+                  aria-pressed={view === 'thoughts'}
+                  title="Thoughts"
+                  onclick={() => void switchView('thoughts')}
                 >
-                  {#if view === 'thoughts'}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <rect x="4" y="4" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
-                      <rect x="14" y="4" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
-                      <rect x="4" y="14" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
-                      <rect x="14" y="14" width="6" height="6" rx="1" class="icon-fill" stroke="none"></rect>
-                    </svg>
-                  {:else}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path>
-                    </svg>
-                  {/if}
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path>
+                  </svg>
                 </button>
-                <div class="tool-placeholder" aria-hidden="true"></div>
+                <button
+                  class="tool-icon stats-tool"
+                  class:active={view === 'stats'}
+                  aria-label="Stats"
+                  aria-pressed={view === 'stats'}
+                  title="Stats"
+                  onclick={() => void switchView('stats')}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 19V13"></path>
+                    <path d="M12 19V9"></path>
+                    <path d="M18 19V5"></path>
+                  </svg>
+                </button>
                 <button
                   class="tool-icon theme-toggle"
                   aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
@@ -1719,10 +1773,16 @@
                 {/each}
               </div>
             </div>
-            {:else}
+            {:else if view === 'thoughts'}
               <div class="thoughts-header">
                 <span>thoughts</span>
                 {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+              </div>
+            {:else}
+              <div class="stats-header" aria-label="Stats columns">
+                <div class="stats-head-cell">7d</div>
+                <div class="stats-head-cell">30d</div>
+                <div class="stats-head-cell">streak</div>
               </div>
             {/if}
           </div>
@@ -1785,6 +1845,28 @@
                 {/if}
               </div>
             </div>
+          {:else if view === 'stats'}
+            {#if board.habits.length === 0}
+              <div class="stats-empty">stats appear after you add a habit</div>
+            {:else}
+              <div class="stats-grid" aria-label="Habit stats">
+                {#each board.habits as habit (habit.id)}
+                  {@const stat = statsFor(habit)}
+                  <div class="stats-row">
+                    <div class="stats-habit" title={habit.name}>{habit.name}</div>
+                    <div class="stats-cell" aria-label={`${habit.name}, last 7 completed days: ${stat.seven.percent ?? 'not enough data'} percent`}>
+                      {stat.seven.percent === null ? '—' : `${stat.seven.percent}%`}
+                    </div>
+                    <div class="stats-cell" aria-label={`${habit.name}, last 30 completed days: ${stat.thirty.percent ?? 'not enough data'} percent`}>
+                      {stat.thirty.percent === null ? '—' : `${stat.thirty.percent}%`}
+                    </div>
+                    <div class="stats-cell stats-streak" aria-label={`${habit.name}, current streak: ${stat.streak} days`}>
+                      {stat.streak}d
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
           {:else if board.habits.length === 0}
             <div class="zero-add-row">
               <div class="zero-add-cell">
@@ -2421,12 +2503,15 @@
     scroll-behavior: auto;
   }
   .grid-scroll::-webkit-scrollbar { display: none; }
-  .grid-scroll.thoughts-mode {
+  .grid-scroll.thoughts-mode,
+  .grid-scroll.stats-mode {
     overflow-x: hidden;
     cursor: default;
   }
   .grid-scroll.thoughts-mode .grid-frame,
-  .grid-scroll.thoughts-mode .timeline-header {
+  .grid-scroll.thoughts-mode .timeline-header,
+  .grid-scroll.stats-mode .grid-frame,
+  .grid-scroll.stats-mode .timeline-header {
     width: 100%;
     min-width: 100%;
   }
@@ -2494,7 +2579,8 @@
   }
   .thoughts-tool { color: var(--icon-thoughts); }
   .thoughts-tool.active::before { opacity: .10; }
-  .tool-placeholder { color: var(--icon-archive); }
+  .stats-tool { color: var(--icon-archive); }
+  .stats-tool.active::before { opacity: .10; }
   .theme-toggle { color: var(--icon-theme); }
   .tool-icon svg {
     position: relative;
@@ -2530,6 +2616,23 @@
     justify-content: space-between;
     color: var(--control-text);
     font-size: 11px;
+  }
+  .stats-header {
+    flex: 1;
+    min-width: 0;
+    height: var(--day-size);
+    display: grid;
+    grid-template-columns: repeat(3, var(--day-size));
+    align-items: stretch;
+    color: var(--muted);
+    font-size: 9px;
+    text-transform: lowercase;
+  }
+  .stats-head-cell {
+    height: var(--day-size);
+    display: grid;
+    place-items: center;
+    border-right: var(--line) solid var(--grid);
   }
   .timeline-meta-row {
     position: sticky;
@@ -2720,6 +2823,53 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     font-weight: 500;
     pointer-events: none;
     will-change: top;
+  }
+  .stats-grid {
+    width: max-content;
+    min-width: calc(var(--habit-width) + (var(--day-size) * 3));
+    background: var(--bg);
+  }
+  .stats-row {
+    height: var(--day-size);
+    display: grid;
+    grid-template-columns: var(--habit-width) repeat(3, var(--day-size));
+    border-bottom: var(--line) solid var(--grid);
+  }
+  .stats-habit {
+    min-width: 0;
+    height: var(--day-size);
+    padding: 0 8px 0 var(--page-inset);
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    border-right: var(--line) solid var(--grid);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .stats-cell {
+    width: var(--day-size);
+    height: var(--day-size);
+    display: grid;
+    place-items: center;
+    border-right: var(--line) solid var(--grid);
+    color: var(--timeline-text);
+    font-size: 11px;
+    line-height: 1;
+  }
+  .stats-streak {
+    color: var(--timeline-mark);
+    font-weight: 600;
+  }
+  .stats-empty {
+    height: var(--day-size);
+    padding-left: var(--page-inset);
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    font-size: 11px;
   }
   .thoughts-grid {
     width: 100%;
