@@ -71,9 +71,6 @@
   let displayMonthIndex = currentDay.getMonth();
   let displayYear = currentDay.getFullYear();
   let monthMenuOpen = false;
-  let yearEditing = false;
-  let yearDraft = String(currentDay.getFullYear());
-  let yearInput: HTMLInputElement;
   const monthOptions = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
   const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
   let showTodayButton = false;
@@ -200,7 +197,7 @@
   }
 
   function isEditableDate(date: string) {
-    return Boolean(enrolledKey && date >= enrolledKey && (date === todayKey || date === yesterdayKey));
+    return date === todayKey || date === yesterdayKey;
   }
 
   function habitStartKey(habit: Habit) {
@@ -684,56 +681,23 @@
     }
     const value = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
     setVisibleMonthState(year, month);
-    yearDraft = String(year);
     void jumpToMonth(value);
   }
 
-  async function beginYearEdit() {
-    monthMenuOpen = false;
-    yearDraft = String(visibleYear());
-    yearEditing = true;
-    await tick();
-    yearInput?.focus();
-    yearInput?.select();
-  }
-
-  function sanitizeYearInput(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    let digits = input.value.replace(/\D/g, '').slice(0, 4);
-    if (digits.length === 4 && Number(digits) > currentDay.getFullYear()) {
-      digits = String(currentDay.getFullYear());
-    }
-    yearDraft = digits;
-    if (input.value !== digits) input.value = digits;
-  }
-
-  function commitYearEdit() {
-    if (!yearEditing) return;
-    const originalYear = visibleYear();
-    const year = Number(yearDraft);
-    yearEditing = false;
-    if (!Number.isInteger(year) || year < 1000 || year > currentDay.getFullYear()) {
-      yearDraft = String(originalYear);
-      return;
-    }
-    if (year === originalYear) {
-      yearDraft = String(year);
+  function commitYearInput(input: HTMLInputElement) {
+    const requested = Number(input.value.trim());
+    const currentYear = currentDay.getFullYear();
+    if (!Number.isInteger(requested) || requested < 2000) {
+      input.value = String(displayYear);
       return;
     }
 
-    const month = visibleMonth();
-    if (year === currentDay.getFullYear() && month > currentDay.getMonth() + 1) {
-      yearDraft = String(currentDay.getFullYear());
-      void scrollToToday();
-      return;
-    }
-
+    const year = Math.min(requested, currentYear);
+    let month = visibleMonth();
+    if (year === currentYear && month > currentDay.getMonth() + 1) month = currentDay.getMonth() + 1;
+    setVisibleMonthState(year, month);
+    input.value = String(year);
     void jumpToMonth(`${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`);
-  }
-
-  function cancelYearEdit() {
-    yearDraft = String(visibleYear());
-    yearEditing = false;
   }
 
   async function jumpToMonth(value: string) {
@@ -768,7 +732,6 @@
 
     updateTimelineStatus();
     setVisibleMonthState(year, month);
-    yearDraft = String(year);
   }
 
   async function scrollToToday() {
@@ -1332,7 +1295,7 @@
     const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
     const onDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (monthMenuOpen && !target?.closest('.month-slot')) monthMenuOpen = false;
+      if (monthMenuOpen && !target?.closest('.month-control')) monthMenuOpen = false;
     };
     const onResize = () => {
       const previousMinimum = minimumVisibleDays;
@@ -1412,56 +1375,7 @@
 <div class="shell">
   <header class="nav-shell" class:scrolled={navScrolled}>
     <div class="navbar">
-      <div class="brand-slot"><div class="brand">3tap</div></div>
-      <div class="month-slot" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
-        <div class="month-control">
-          <button
-            class="month-button"
-            aria-label={`Change month. Currently ${monthOptions[displayMonthIndex]}`}
-            aria-haspopup="true"
-            aria-expanded={monthMenuOpen}
-            onclick={toggleMonthMenu}
-          >{monthOptions[displayMonthIndex]}</button>
-          {#if monthMenuOpen}
-            <div class="month-menu" aria-label="Choose month">
-              {#each monthOptions as monthName, index}
-                <button
-                  class="month-option"
-                  class:selected={displayMonthIndex === index}
-                  aria-pressed={displayMonthIndex === index}
-                  onclick={() => chooseMonth(index + 1)}
-                >{monthName}</button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-        {#if yearEditing}
-          <input
-            class="year-input"
-            bind:this={yearInput}
-            value={yearDraft}
-            aria-label="Jump to year"
-            inputmode="numeric"
-            pattern="[0-9]*"
-            maxlength="4"
-            autocomplete="off"
-            oninput={sanitizeYearInput}
-            onblur={commitYearEdit}
-            onkeydown={(event) => {
-              if (event.key === 'Enter') event.currentTarget.blur();
-              if (event.key === 'Escape') cancelYearEdit();
-            }}
-          />
-        {:else}
-          <button class="year-button" aria-label={`Change year. Currently ${displayYear}`} onclick={beginYearEdit}>{displayYear}</button>
-        {/if}
-      </div>
-      <div class="nav-fill">{#if !online}<span class="offline" aria-live="polite">offline</span>{/if}</div>
-      <div class="today-slot">
-        {#if showTodayButton}
-          <button class="nav-today" aria-label="Jump to today" onclick={scrollToToday}>today →</button>
-        {/if}
-      </div>
+      <div class="brand-slot">3tap</div>
     </div>
   </header>
 
@@ -1522,19 +1436,72 @@
                 </button>
               </nav>
             </div>
-            <div class="day-head-strip">
-              {#each dates as date (date.key)}
-                <div
-                  class="day-head"
-                  class:today={date.key === todayKey}
-                  class:yesterday={date.key === yesterdayKey}
-                  class:enrolled={date.key === enrolledKey}
-                  class:prestart={isPreEnrollment(date.key)}
-                >
-                  <span>{date.weekday}</span>
-                  <strong>{date.day}</strong>
+            <div class="timeline-main-header">
+              <div class="timeline-meta-row">
+                <div class="month-slot" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
+                  <div class="month-control">
+                    <button
+                      class="month-button"
+                      aria-label={`Change month. Currently ${monthOptions[displayMonthIndex]}`}
+                      aria-haspopup="true"
+                      aria-expanded={monthMenuOpen}
+                      onclick={toggleMonthMenu}
+                    >{monthOptions[displayMonthIndex]}</button>
+                    {#if monthMenuOpen}
+                      <div class="date-menu month-menu" aria-label="Choose month">
+                        {#each monthOptions as monthName, index}
+                          <button
+                            class="date-option"
+                            class:selected={displayMonthIndex === index}
+                            aria-pressed={displayMonthIndex === index}
+                            onclick={() => chooseMonth(index + 1)}
+                          >{monthName}</button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="year-control">
+                    <input
+                      class="year-input"
+                      aria-label={`Jump to year. Currently ${displayYear}`}
+                      inputmode="numeric"
+                      pattern="[0-9]*"
+                      value={displayYear}
+                      onfocus={(event) => event.currentTarget.select()}
+                      onclick={(event) => event.currentTarget.select()}
+                      onkeydown={(event) => {
+                        if (event.key !== 'Enter') return;
+                        event.preventDefault();
+                        commitYearInput(event.currentTarget);
+                        event.currentTarget.blur();
+                      }}
+                      onblur={(event) => commitYearInput(event.currentTarget)}
+                    />
+                  </div>
                 </div>
-              {/each}
+                <div class="timeline-meta-fill">
+                  {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+                </div>
+                <div class="today-slot">
+                  {#if showTodayButton}
+                    <button class="nav-today" aria-label="Jump to today" onclick={scrollToToday}>today →</button>
+                  {/if}
+                </div>
+              </div>
+              <div class="day-head-strip">
+                {#each dates as date (date.key)}
+                  <div
+                    class="day-head"
+                    class:today={date.key === todayKey}
+                    class:yesterday={date.key === yesterdayKey}
+                    class:enrolled={date.key === enrolledKey}
+                    class:prestart={isPreEnrollment(date.key)}
+                  >
+                    <span>{date.weekday}</span>
+                    <strong>{date.day}</strong>
+                  </div>
+                {/each}
+              </div>
             </div>
           </div>
           {#if board.habits.length === 0}
@@ -1610,7 +1577,7 @@
                 </th>
                 {#each dates as date (date.key)}
                   {@const value = valueFor(habit.id, date.key)}
-                  {@const prestart = isPreEnrollment(date.key) || isBeforeHabitStart(habit, date.key)}
+                  {@const prestart = date.key === yesterdayKey ? false : isPreEnrollment(date.key) || isBeforeHabitStart(habit, date.key)}
                   {@const editable = isEditableDate(date.key) && !prestart}
                   <td
                     class:today={date.key === todayKey}
@@ -1671,13 +1638,13 @@
       </div>
       {#if board.habits.length === 0}
         <section class="zero-tutorial" aria-label="Getting started">
+          <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
           <ul class="zero-tutorial-list">
-            <li><strong>+ habit</strong> to start</li>
-            <li>tap today or yesterday: <b>-</b> missed · <b>|</b> done · <b>+</b> great</li>
-            <li>older days lock · <b>·</b> = before the habit existed</li>
-            <li>tap a habit name to rename · drag it to reorder</li>
-            <li>swipe/drag sideways for history · month/year to jump</li>
-            <li>archive keeps history · phone pairs/recovers · moon/sun changes theme</li>
+            <li>tap today or yesterday: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
+            <li>older days lock; <b>·</b> means before the habit existed</li>
+            <li>tap a habit name to rename; drag it to reorder</li>
+            <li>swipe/drag sideways for history; tap month/year to jump</li>
+            <li>archive keeps history; phone pairs or recovers; moon/sun changes theme</li>
           </ul>
         </section>
       {/if}
@@ -1919,6 +1886,7 @@
 
   .shell {
     --day-size: 48px;
+    --timeline-meta-height: 22px;
     --habit-width: calc(var(--day-size) * 3);
     --line: 1px;
     --grid: var(--grid-weak-theme);
@@ -1937,63 +1905,64 @@
   }
   .nav-shell.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
   .navbar {
-    position: relative;
     height: calc(var(--day-size) + env(safe-area-inset-top));
     min-height: calc(var(--day-size) + env(safe-area-inset-top));
-    display: grid;
-    grid-template-columns: var(--habit-width) calc(var(--day-size) * 2) minmax(0, 1fr) calc(var(--day-size) * 2);
-    align-items: stretch;
     width: 100%;
     padding-top: env(safe-area-inset-top);
+    box-sizing: border-box;
     background: var(--bg);
     border-bottom: var(--line) solid var(--grid);
   }
-  .navbar::after {
+  .brand-slot {
+    position: relative;
+    width: var(--habit-width);
+    height: var(--day-size);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    padding-left: var(--page-inset);
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: .08em;
+  }
+  .brand-slot::after {
     content: '';
     position: absolute;
-    z-index: 2;
     top: 0;
+    right: 0;
     bottom: 0;
-    left: var(--habit-width);
     width: var(--line);
     background: var(--grid);
     pointer-events: none;
   }
-  .brand-slot,
   .month-slot,
-  .nav-fill,
+  .timeline-meta-fill,
   .today-slot {
     min-width: 0;
-    height: var(--day-size);
+    height: var(--timeline-meta-height);
     display: flex;
     align-items: center;
-  }
-  .brand-slot { padding-left: var(--page-inset); }
-  .brand {
-    font-size: 12px;
-    letter-spacing: .08em;
-    text-transform: lowercase;
-    opacity: .5;
   }
   .month-slot {
     position: relative;
     width: 100%;
-    justify-content: center;
-    gap: 6px;
-    padding: 0;
+    box-sizing: border-box;
+    justify-content: flex-start;
+    gap: 0;
+    padding-left: 8px;
     overflow: visible;
     color: var(--text);
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 0;
-    text-align: center;
+    text-align: left;
     white-space: nowrap;
   }
-  .nav-fill { justify-content: flex-end; padding-right: 8px; }
-  .today-slot { justify-content: flex-end; padding-right: var(--page-inset); }
+  .timeline-meta-fill { justify-content: flex-end; padding-right: 8px; }
+  .today-slot { justify-content: flex-end; padding-right: 8px; }
   .offline { font-size: 10px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
   .month-button,
-  .year-button,
+  .year-input,
   .nav-today {
     height: auto;
     min-height: 0;
@@ -2004,62 +1973,59 @@
     background: transparent;
     color: var(--control-text);
     font: inherit;
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1;
     opacity: 1;
     white-space: nowrap;
   }
-  .month-control {
+  .month-control,
+  .year-control {
     position: relative;
-    width: 3.2em;
     flex: none;
   }
-  .month-button { width: 100%; text-align: center; }
-  .year-button { width: 4ch; text-align: center; }
-  .nav-today { width: auto; text-align: right; }
+  .month-control { width: 34px; }
+  .year-control { width: 36px; }
+  .month-button {
+    width: 34px;
+    text-align: center;
+  }
   .year-input {
-    width: 4ch;
-    min-width: 4ch;
-    height: auto;
-    min-height: 0;
-    margin: 0;
+    width: 36px;
+    box-sizing: border-box;
     border: 0;
-    border-bottom: 1px solid var(--control-active);
+    border-bottom: 1px solid transparent;
     border-radius: 0;
-    outline: none;
-    box-shadow: none;
-    appearance: none;
-    -webkit-appearance: none;
-    display: block;
+    outline: 0;
     padding: 2px 0 3px;
     background: transparent;
-    color: var(--control-active);
+    color: var(--control-text);
     font: inherit;
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1;
-    opacity: 1;
     text-align: center;
-    caret-color: currentColor;
+    appearance: textfield;
+    cursor: pointer;
   }
-  .month-menu {
-    position: absolute;
+  .year-input::-webkit-outer-spin-button,
+  .year-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .nav-today { width: auto; text-align: right; }
+  .date-menu {
+    position: fixed;
     z-index: 80;
-    top: 100%;
-    left: 0;
-    width: 100%;
-    max-height: min(432px, calc(100dvh - (var(--day-size) * 2) - 12px));
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
+    top: calc(env(safe-area-inset-top) + var(--day-size) + var(--timeline-meta-height));
+    width: 34px;
+    box-sizing: border-box;
     background: var(--bg);
     border: var(--line) solid var(--grid);
   }
-  .month-menu::-webkit-scrollbar { display: none; }
-  .month-option {
+  .month-menu {
+    left: calc(var(--habit-width) + 8px);
+    max-height: none;
+    overflow: visible;
+  }
+  .date-option {
     width: 100%;
-    height: 36px;
+    height: 20px;
     display: grid;
     place-items: center;
     border-bottom: var(--line) solid var(--grid);
@@ -2069,18 +2035,18 @@
     line-height: 1;
     text-align: center;
   }
-  .month-option:last-child { border-bottom: 0; }
-  .month-option.selected {
+  .date-option:last-child { border-bottom: 0; }
+  .date-option.selected {
     background: var(--today-fill);
     color: var(--control-active);
   }
-  .month-option:focus-visible {
+  .date-option:focus-visible {
     outline: 1px solid var(--control-active);
     outline-offset: -2px;
     color: var(--control-active);
   }
   .month-button:focus-visible,
-  .year-button:focus-visible,
+  .year-input:focus-visible,
   .nav-today:focus-visible {
     outline: none;
     color: var(--control-active);
@@ -2092,12 +2058,12 @@
     :global(html:not(.habit-dragging-cursor)) .panel-button-danger:not(:disabled):hover { color: var(--danger); }
     :global(html:not(.habit-dragging-cursor)) .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
     :global(html:not(.habit-dragging-cursor)) .month-button:hover,
-    :global(html:not(.habit-dragging-cursor)) .year-button:hover,
+    :global(html:not(.habit-dragging-cursor)) .year-input:hover,
     :global(html:not(.habit-dragging-cursor)) .nav-today:hover {
       color: var(--control-active);
       border-bottom-color: var(--control-active);
     }
-    :global(html:not(.habit-dragging-cursor)) .month-option:hover { background: var(--hover); color: var(--control-active); }
+    :global(html:not(.habit-dragging-cursor)) .date-option:hover { background: var(--hover); color: var(--control-active); }
     :global(html:not(.habit-dragging-cursor)) .habit-controls button:not(:disabled):hover { opacity: 1; }
     :global(html:not(.habit-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
     .grid-scroll { cursor: grab; }
@@ -2147,7 +2113,7 @@
     z-index: 9;
     top: 0;
     bottom: 0;
-    right: calc(-1 * var(--line));
+    right: 0;
     width: var(--line);
     background: var(--grid);
     pointer-events: none;
@@ -2155,6 +2121,7 @@
   .timeline-controls {
     width: 100%;
     height: var(--day-size);
+    margin-top: 0;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     align-items: stretch;
@@ -2201,6 +2168,25 @@
   .tool-icon:focus-visible { outline: none; }
   .tool-icon:focus-visible::before { opacity: .12; }
 
+  .timeline-main-header {
+    position: relative;
+    width: max-content;
+    height: var(--day-size);
+  }
+  .timeline-meta-row {
+    position: sticky;
+    left: var(--habit-width);
+    z-index: 20;
+    width: calc(100vw - var(--habit-width));
+    height: var(--timeline-meta-height);
+    display: grid;
+    grid-template-columns: calc(var(--day-size) * 2.25) minmax(0, 1fr) auto;
+    align-items: center;
+    box-sizing: border-box;
+    margin-bottom: calc(-1 * var(--timeline-meta-height));
+    background: transparent;
+  }
+
   .day-head-strip {
     position: relative;
     z-index: 2;
@@ -2209,38 +2195,40 @@
     width: max-content;
   }
   .day-head {
+    position: relative;
     width: var(--day-size);
     min-width: var(--day-size);
     max-width: var(--day-size);
     height: var(--day-size);
+    box-sizing: border-box;
+    padding-top: var(--timeline-meta-height);
+    padding-bottom: 2px;
     display: grid;
-    align-content: center;
+    align-content: end;
     justify-items: center;
-    gap: 2px;
-    font-size: 10px;
+    gap: 0;
+    font-size: 9px;
     background: transparent;
+  }
+  .day-head::before {
+    content: '';
+    position: absolute;
+    top: var(--timeline-meta-height);
+    bottom: 0;
+    left: 0;
+    width: var(--line);
+    background: var(--grid);
+    pointer-events: none;
   }
   .day-head span,
   .day-head strong {
     display: block;
     color: var(--timeline-text);
     font-weight: 400;
-    line-height: 1.15;
+    line-height: 1;
     opacity: 1;
   }
-  .day-head strong { font-size: 11px; }
-  .day-head.today { background: var(--today-fill); }
-  .day-head.today span,
-  .day-head.today strong {
-    color: var(--today-accent);
-    opacity: 1;
-  }
-  .day-head.yesterday { background: var(--yesterday-fill); }
-  .day-head.yesterday span,
-  .day-head.yesterday strong {
-    color: var(--yesterday-accent);
-    opacity: 1;
-  }
+  .day-head strong { font-size: 10px; }
   table {
     border-collapse: separate;
     border-spacing: 0;
@@ -2296,7 +2284,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     z-index: 9;
     top: 0;
     bottom: -1px;
-    right: calc(-1 * var(--line));
+    right: 0;
     width: var(--line);
     background: var(--grid);
     pointer-events: none;
@@ -2416,16 +2404,31 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     font-size: 10px;
     line-height: 1.55;
   }
+  .zero-tutorial-start {
+    width: max-content;
+    max-width: 100%;
+    margin: 0 auto 8px;
+  }
   .zero-tutorial-list {
     width: max-content;
     max-width: 100%;
     margin: 0 auto;
-    padding-left: 18px;
+    padding: 0;
+    list-style: none;
     display: grid;
     gap: 7px;
     text-align: left;
   }
-  .zero-tutorial-list li::marker { color: var(--muted); }
+  .zero-tutorial-list li {
+    position: relative;
+    padding-left: 14px;
+  }
+  .zero-tutorial-list li::before {
+    content: '–';
+    position: absolute;
+    left: 0;
+    color: var(--muted);
+  }
   .zero-tutorial strong {
     color: var(--text);
     font-size: 11px;
@@ -2491,8 +2494,8 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   }
   .add-input { width: 100%; }
   td { text-align: center; background: transparent; }
-  .today { background: var(--today-fill); }
-  .yesterday { background: var(--yesterday-fill); }
+  td.today { background: var(--today-fill); }
+  td.yesterday { background: var(--yesterday-fill); }
 tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   td.prestart { background: transparent; }
   td.locked .cell,
