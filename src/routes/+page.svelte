@@ -132,6 +132,8 @@
   let dragMoveRaf = 0;
   let dragPendingY: number | null = null;
   let dragLastClientY: number | null = null;
+  let dragHoldTimer: ReturnType<typeof setTimeout> | undefined;
+  const cellPresses = new Map<number, { habitId: string; date: string; button: HTMLButtonElement; startX: number; startY: number; moved: boolean }>();
   let timelinePanPointerId: number | null = null;
   let timelinePanStartX = 0;
   let timelinePanStartScrollLeft = 0;
@@ -366,6 +368,34 @@
 
     localTapValues.set(cellKey(habitId, date), change);
     queueChange(change);
+  }
+
+  function startCellPress(event: PointerEvent, habitId: string, date: string) {
+    if (event.button !== 0 || !isEditableDate(date)) return;
+    cellPresses.set(event.pointerId, {
+      habitId,
+      date,
+      button: event.currentTarget as HTMLButtonElement,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false
+    });
+  }
+
+  function moveCellPress(event: PointerEvent) {
+    const press = cellPresses.get(event.pointerId);
+    if (!press || press.moved) return;
+    if (Math.hypot(event.clientX - press.startX, event.clientY - press.startY) > 6) press.moved = true;
+  }
+
+  function endCellPress(event: PointerEvent) {
+    const press = cellPresses.get(event.pointerId);
+    cellPresses.delete(event.pointerId);
+    if (press && !press.moved) tapCell(press.habitId, press.date, press.button);
+  }
+
+  function cancelCellPress(event: PointerEvent) {
+    cellPresses.delete(event.pointerId);
   }
 
   function resetToFreshLocalBoard() {
@@ -984,7 +1014,7 @@
     event.stopPropagation();
   }
 
-  function activateItemDrag(event: PointerEvent) {
+  function activateItemDrag(clientY: number) {
     if (!board || !dragCandidate || dragActive) return;
     const { kind, itemId } = dragCandidate;
     const item = kind === 'habit'
@@ -1009,7 +1039,7 @@
     dragPreviewLeft = rect.left;
     dragPreviewWidth = rect.width;
     dragPreviewHeight = rect.height;
-    dragPreviewTop = event.clientY - dragCandidate.offsetY;
+    dragPreviewTop = clientY - dragCandidate.offsetY;
     dragLastClientY = dragCandidate.startY;
     document.documentElement.classList.add('item-dragging-cursor');
     window.addEventListener('click', blockDragClick, true);
@@ -1061,6 +1091,8 @@
     window.removeEventListener('pointermove', onItemDragMove);
     window.removeEventListener('pointerup', onItemDragEnd);
     window.removeEventListener('pointercancel', onItemDragCancel);
+    if (dragHoldTimer) clearTimeout(dragHoldTimer);
+    dragHoldTimer = undefined;
     document.documentElement.classList.remove('item-dragging-cursor');
     if (dragMoveRaf) cancelAnimationFrame(dragMoveRaf);
     dragMoveRaf = 0;
@@ -1092,7 +1124,14 @@
     if (!dragCandidate || event.pointerId !== dragPointerId) return;
     const dx = event.clientX - dragCandidate.startX;
     const dy = event.clientY - dragCandidate.startY;
-    if (!dragActive && Math.hypot(dx, dy) >= 5) activateItemDrag(event);
+    if (!dragActive) {
+      const distance = Math.hypot(dx, dy);
+      if (dragCandidate.kind === 'thought' && distance >= 5) activateItemDrag(event.clientY);
+      else if (dragCandidate.kind === 'habit' && distance > 8) {
+        cleanupItemDrag(false);
+        return;
+      }
+    }
     if (!dragActive) return;
 
     event.preventDefault();
@@ -1132,10 +1171,11 @@
     if (kind === 'habit' && editingHabitId === itemId) return;
     if (kind === 'thought' && editingThoughtId === itemId) return;
     const target = event.target as HTMLElement;
-    if (target.closest('.habit-controls, .thought-controls, input')) return;
-
-    const cell = event.currentTarget as HTMLElement;
-    const rect = cell.getBoundingClientRect();
+    if (kind === 'thought' && target.closest('.thought-controls, input')) return;
+    const handle = event.currentTarget as HTMLElement;
+    const dragSurface = handle.closest<HTMLElement>(kind === 'habit' ? '.habit-name' : '.thought-cell') ?? handle;
+    const rect = dragSurface.getBoundingClientRect();
+    if (kind === 'habit') event.preventDefault();
     dragPointerId = event.pointerId;
     dragCandidate = {
       itemId,
@@ -1147,6 +1187,12 @@
     window.addEventListener('pointermove', onItemDragMove, { passive: false });
     window.addEventListener('pointerup', onItemDragEnd);
     window.addEventListener('pointercancel', onItemDragCancel);
+    if (kind === 'habit') {
+      dragHoldTimer = setTimeout(() => {
+        dragHoldTimer = undefined;
+        if (dragCandidate && dragPointerId === event.pointerId) activateItemDrag(dragCandidate.startY);
+      }, 180);
+    }
   }
 
   function undoArchiveToast() {
@@ -1771,8 +1817,6 @@
               >
                 <th
                   class="habit-name"
-                  aria-label={`Drag ${habit.name} to reorder`}
-                  onpointerdown={(event) => startItemDrag(event, habit.id, 'habit')}
                 >
                   <div class="habit-line">
                     {#if editingHabitId === habit.id}
@@ -1794,6 +1838,21 @@
                       <button class="habit-label" onclick={() => beginRename(habit)}>{habit.name}</button>
                     {/if}
                     <div class="habit-controls">
+                      <button
+                        class="drag-habit"
+                        aria-label={`Hold and drag to reorder ${habit.name}`}
+                        title="Hold and drag to reorder"
+                        onpointerdown={(event) => startItemDrag(event, habit.id, 'habit')}
+                      >
+                        <svg class="row-drag-icon" viewBox="0 0 16 16" aria-hidden="true">
+                          <circle cx="5" cy="4" r="1" />
+                          <circle cx="11" cy="4" r="1" />
+                          <circle cx="5" cy="8" r="1" />
+                          <circle cx="11" cy="8" r="1" />
+                          <circle cx="5" cy="12" r="1" />
+                          <circle cx="11" cy="12" r="1" />
+                        </svg>
+                      </button>
                       <button
                         class="delete-habit"
                         aria-label={`Archive ${habit.name}`}
@@ -1828,9 +1887,10 @@
                       aria-label={prestart
                         ? `${habit.name}, ${date.key}: unavailable`
                         : `${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', locked'}`}
-                      onpointerdown={(event) => {
-                        if (event.button === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}
+                      onpointerdown={(event) => startCellPress(event, habit.id, date.key)}
+                      onpointermove={moveCellPress}
+                      onpointerup={endCellPress}
+                      onpointercancel={cancelCellPress}
                       onclick={(event) => {
                         if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
                       }}>{prestart ? '' : symbols[value]}</button>
@@ -2300,7 +2360,7 @@
     :global(html:not(.item-dragging-cursor)) .thought-controls button:not(:disabled):hover { opacity: 1; }
     :global(html:not(.item-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
     .grid-scroll { cursor: grab; }
-    .habit-name, .thought-cell { cursor: grab; }
+    .thought-cell { cursor: grab; }
   }
 
   main { width: 100%; padding-bottom: 24px; }
@@ -2569,13 +2629,13 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   .habit-controls {
     flex: none;
     display: grid;
-    grid-template-columns: 36px;
+    grid-template-columns: repeat(2, 30px);
     align-items: center;
     justify-items: center;
     margin-left: auto;
   }
   .habit-controls button {
-    width: 36px;
+    width: 30px;
     height: 36px;
     display: grid;
     place-items: center;
@@ -2598,14 +2658,22 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     height: 18px;
     stroke-width: 1.5;
   }
-  .habit-controls .delete-habit { color: var(--control-text); }
-  .habit-name {
+  .habit-controls .row-drag-icon {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+    stroke: none;
+  }
+  .habit-controls .drag-habit {
     cursor: grab;
     touch-action: none;
+  }
+  .habit-controls .drag-habit:active { cursor: grabbing; }
+  .habit-controls .delete-habit { color: var(--control-text); }
+  .habit-name {
     user-select: none;
     -webkit-user-select: none;
   }
-  .habit-name:active { cursor: grabbing; }
   tr.dragging > th,
   tr.dragging > td,
   .thought-row.dragging { opacity: .08; }
@@ -2840,6 +2908,11 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
     opacity: 1;
   }
   .cell:not(:disabled):active { background: var(--press-fill); }
+
+  @media (max-width: 767px) {
+    input,
+    textarea { font-size: 16px; }
+  }
 
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
   .panel { position: relative; width: min(420px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 22px; scrollbar-width: none; }
