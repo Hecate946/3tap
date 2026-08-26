@@ -714,7 +714,11 @@
 
   function startTimelineTouch(event: TouchEvent) {
     if (view !== 'habits') return;
-    if (!scroller || event.touches.length !== 1 || dragActive) return;
+    if (!scroller || dragActive) return;
+    if (event.touches.length !== 1) {
+      endTimelineTouch();
+      return;
+    }
     const target = event.target as HTMLElement | null;
     if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
     const touch = event.touches[0];
@@ -727,6 +731,10 @@
 
   function moveTimelineTouch(event: TouchEvent) {
     if (!scroller || timelineTouchId === null) return;
+    if (event.touches.length !== 1) {
+      endTimelineTouch();
+      return;
+    }
     const touch = Array.from(event.touches).find((item) => item.identifier === timelineTouchId);
     if (!touch) return;
     const dx = touch.clientX - timelineTouchStartX;
@@ -1009,6 +1017,24 @@
     setLocalHabits(board.habits.map((habit) => (habit.id === id ? { ...habit, name } : habit)));
   }
 
+  function resetViewportZoom() {
+    if (!browser) return;
+    const viewport = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    if (!viewport) return;
+    const original = viewport.content;
+    viewport.content = 'width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover';
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        viewport.content = original;
+      });
+    });
+  }
+
+  function finishInlineEditFromKeyboard(input: HTMLInputElement) {
+    input.blur();
+    setTimeout(resetViewportZoom, 60);
+  }
+
   function blockDragClick(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -1167,7 +1193,7 @@
   }
 
   function startItemDrag(event: PointerEvent, itemId: string, kind: 'habit' | 'thought') {
-    if (!board || event.button !== 0) return;
+    if (!board || event.button !== 0 || !event.isPrimary) return;
     if (kind === 'habit' && editingHabitId === itemId) return;
     if (kind === 'thought' && editingThoughtId === itemId) return;
     const target = event.target as HTMLElement;
@@ -1175,7 +1201,7 @@
     const handle = event.currentTarget as HTMLElement;
     const dragSurface = handle.closest<HTMLElement>(kind === 'habit' ? '.habit-name' : '.thought-cell') ?? handle;
     const rect = dragSurface.getBoundingClientRect();
-    if (kind === 'habit') event.preventDefault();
+    if (kind === 'habit' && event.pointerType === 'mouse') event.preventDefault();
     dragPointerId = event.pointerId;
     dragCandidate = {
       itemId,
@@ -1743,8 +1769,12 @@
                         maxlength="240"
                         aria-label="Edit thought"
                         onblur={commitThoughtEdit}
+                        enterkeyhint="done"
                         onkeydown={(event) => {
-                          if (event.key === 'Enter') event.currentTarget.blur();
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            finishInlineEditFromKeyboard(event.currentTarget);
+                          }
                           if (event.key === 'Escape') {
                             editingThoughtId = null;
                             editingThoughtText = '';
@@ -1826,8 +1856,12 @@
                         bind:value={editingHabitName}
                         aria-label={`Rename ${habit.name}`}
                         onblur={commitRename}
+                        enterkeyhint="done"
                         onkeydown={(event) => {
-                          if (event.key === 'Enter') event.currentTarget.blur();
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            finishInlineEditFromKeyboard(event.currentTarget);
+                          }
                           if (event.key === 'Escape') {
                             editingHabitId = null;
                             editingHabitName = '';
@@ -2370,7 +2404,7 @@
     overflow-x: auto;
     overflow-y: hidden;
     overscroll-behavior-x: contain;
-    touch-action: pan-y;
+    touch-action: pan-y pinch-zoom;
     scrollbar-width: none;
     -ms-overflow-style: none;
     -webkit-overflow-scrolling: auto;
@@ -2666,7 +2700,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   }
   .habit-controls .drag-habit {
     cursor: grab;
-    touch-action: none;
+    touch-action: pinch-zoom;
   }
   .habit-controls .drag-habit:active { cursor: grabbing; }
   .habit-controls .delete-habit { color: var(--control-text); }
@@ -2708,7 +2742,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     display: flex;
     align-items: center;
     gap: 8px;
-    touch-action: none;
+    touch-action: pinch-zoom;
     user-select: none;
     -webkit-user-select: none;
   }
@@ -2778,10 +2812,10 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     height: var(--day-size);
     display: flex;
     align-items: stretch;
-    touch-action: pan-y;
+    touch-action: pan-y pinch-zoom;
     cursor: default;
   }
-  .zero-add-row * { touch-action: pan-y; }
+  .zero-add-row * { touch-action: pan-y pinch-zoom; }
   .zero-add-row button { cursor: pointer; }
   .zero-add-days {
     display: flex;
@@ -2866,7 +2900,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
   }
   .add-row,
   .add-row * {
-    touch-action: pan-y;
+    touch-action: pan-y pinch-zoom;
     cursor: default;
   }
   .add-row button { cursor: pointer; }
