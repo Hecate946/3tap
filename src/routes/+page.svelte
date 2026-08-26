@@ -48,7 +48,6 @@
   let online = true;
   let theme: 'light' | 'dark' = 'light';
   let view: 'habits' | 'thoughts' = 'habits';
-  let navScrolled = false;
   let navMenuOpen = false;
   let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
   let qrDataUrl = '';
@@ -1526,7 +1525,6 @@
     const onOnline = () => credentials ? void sync() : void initialize();
     const onOffline = () => (online = false);
     const onVisibility = () => { if (document.visibilityState === 'visible') void sync(); scheduleSyncLoop(); };
-    const onVerticalScroll = () => (navScrolled = window.scrollY > 1);
     const onDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (navMenuOpen && !target?.closest('.nav-actions')) navMenuOpen = false;
@@ -1570,9 +1568,7 @@
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
-    window.addEventListener('scroll', onVerticalScroll, { passive: true });
     document.addEventListener('pointerdown', onDocumentPointerDown);
-    onVerticalScroll();
 
     scheduleSyncLoop();
     scheduleNextDay();
@@ -1588,7 +1584,6 @@
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', onResize);
-      window.removeEventListener('scroll', onVerticalScroll);
       document.removeEventListener('pointerdown', onDocumentPointerDown);
       if (syncTimer) clearTimeout(syncTimer);
       if (dayTimer) clearTimeout(dayTimer);
@@ -1611,7 +1606,7 @@
 </svelte:head>
 
 <div class="shell">
-  <header class="nav-shell" class:scrolled={navScrolled}>
+  <header class="nav-shell">
     <div class="navbar">
       <div class="brand-slot">
         <button class="brand-button" aria-label="Habits" onclick={() => void switchView('habits')}>3tap</button>
@@ -2219,15 +2214,10 @@
     padding: 0;
   }
   .nav-shell {
-    position: sticky;
-    top: 0;
-    z-index: 40;
+    position: relative;
     width: 100%;
     background: var(--bg);
-    box-shadow: 0 0 0 transparent;
-    transition: box-shadow 90ms linear;
   }
-  .nav-shell.scrolled { box-shadow: 0 2px 4px var(--nav-shadow); }
   .navbar {
     position: relative;
     height: calc(var(--day-size) + env(safe-area-inset-top));
