@@ -195,7 +195,20 @@
   }
 
   function timelineStartDate() {
-    return enrollmentDate(board) ?? currentDay;
+    const yesterday = shiftedDate(currentDay, -1);
+    if (!board?.habits.length) return yesterday;
+
+    const boardStart = enrollmentDate(board);
+    let oldest: Date | null = null;
+    for (const habit of board.habits) {
+      const created = habit.createdAt ? new Date(habit.createdAt) : boardStart;
+      if (!created || Number.isNaN(created.getTime())) continue;
+      const start = new Date(created.getFullYear(), created.getMonth(), created.getDate(), 12);
+      if (!oldest || start < oldest) oldest = start;
+    }
+
+    const activeStart = oldest ?? boardStart;
+    return activeStart && activeStart < yesterday ? activeStart : yesterday;
   }
 
   function earliestTimelineOffset() {
@@ -269,20 +282,6 @@
   function valueFor(habitId: string, date: string): MarkValue {
     const key = cellKey(habitId, date);
     return (localTapValues.get(key)?.value ?? entries.get(key)?.value ?? 0) as MarkValue;
-  }
-
-  function applyLocalEntry(change: PendingEntry) {
-    if (!board) return;
-    const key = cellKey(change.habitId, change.date);
-    if (change.value === 0) {
-      entries.delete(key);
-    } else {
-      entries.set(key, {
-        habitId: change.habitId,
-        date: change.date,
-        value: change.value as 1 | 2
-      });
-    }
   }
 
   function pendingChanges() {
@@ -2491,7 +2490,6 @@
     pointer-events: none;
   }
   .tool-icon .icon-fill { fill: currentColor; }
-  .tool-icon .icon-cutout { fill: var(--bg); }
   .tool-icon:active::before { opacity: .18; }
   .tool-icon:focus-visible { outline: none; }
   .tool-icon:focus-visible::before { opacity: .12; }

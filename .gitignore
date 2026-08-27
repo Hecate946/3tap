@@ -8,3 +8,4 @@ build/
 supabase/.temp/
 secrets.txt
 3tap-source.zip
+worker-configuration.d.ts

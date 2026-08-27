@@ -1,8 +1,5 @@
 import type { Board, Entry, Habit, Thought } from '$lib/types';
 
-export const DEV_FIXTURE_NAMES = ['empty', '1d', '2d', '7d', '31d', '6mo', 'late', 'sparse'] as const;
-export type DevFixtureName = (typeof DEV_FIXTURE_NAMES)[number];
-
 function atNoon(base: Date, offset: number) {
   const date = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 12);
   date.setDate(date.getDate() + offset);
