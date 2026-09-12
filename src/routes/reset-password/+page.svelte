@@ -9,12 +9,7 @@
   let invalid = false;
 
   const passwordChecks = [
-    ['12+ characters', (v: string) => v.length >= 12],
-    ['one lowercase letter', (v: string) => /[a-z]/.test(v)],
-    ['one uppercase letter', (v: string) => /[A-Z]/.test(v)],
-    ['one number', (v: string) => /[0-9]/.test(v)],
-    ['one symbol', (v: string) => /[^A-Za-z0-9]/.test(v)],
-    ['no spaces', (v: string) => !/\s/.test(v)]
+    ['8+ characters', (v: string) => v.length >= 8]
   ] as const;
   $: passwordValid = password.length <= 128 && passwordChecks.every(([, test]) => test(password));
 

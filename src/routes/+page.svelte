@@ -44,7 +44,6 @@
   let online = true;
   let authMode: 'login' | 'signup' | 'forgot' = 'login';
   let authEmail = '';
-  let authDisplayName = '';
   let authPassword = '';
   let authError = '';
   let authNotice = '';
@@ -1374,12 +1373,7 @@
   }
 
   const passwordChecks = [
-    ['12+ characters', (value: string) => value.length >= 12],
-    ['one lowercase letter', (value: string) => /[a-z]/.test(value)],
-    ['one uppercase letter', (value: string) => /[A-Z]/.test(value)],
-    ['one number', (value: string) => /[0-9]/.test(value)],
-    ['one symbol', (value: string) => /[^A-Za-z0-9]/.test(value)],
-    ['no spaces', (value: string) => !/\s/.test(value)]
+    ['8+ characters', (value: string) => value.length >= 8]
   ] as const;
 
   function validPassword(value: string) {
@@ -1429,15 +1423,24 @@
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(authMode === 'signup'
-          ? { email, displayName: authDisplayName.trim(), password: authPassword }
+          ? { email, password: authPassword }
           : { email, password: authPassword })
       });
       if (!response.ok) {
         if (response.status === 409) authError = 'an account already exists for this email';
         else if (response.status === 401) authError = 'incorrect email or password';
         else {
-          const message = await response.text();
-          authError = message.includes('Email not confirmed') ? 'verify your email before logging in' : 'could not continue';
+          const rawMessage = (await response.text()).trim();
+          let message = rawMessage;
+          try {
+            const parsed = JSON.parse(rawMessage) as { message?: string };
+            if (typeof parsed.message === 'string') message = parsed.message;
+          } catch { /* plain-text error */ }
+          const lower = message.toLowerCase();
+          if (lower.includes('email not confirmed')) authError = 'verify your email before logging in';
+          else if (lower.includes('password')) authError = message.replace(/^\s*\d{3}\s+/, '') || 'check your password and try again';
+          else if (response.status === 400) authError = message.replace(/^\s*\d{3}\s+/, '') || 'check your email and password';
+          else authError = 'account service unavailable — try again';
         }
         return;
       }
@@ -1450,11 +1453,11 @@
       }
       if (data.credentials && data.board) loadRecoveredBoard({ credentials: data.credentials, board: data.board });
       authPassword = '';
-      authDisplayName = '';
       await tick();
       await scrollToToday();
-    } catch {
-      authError = 'could not continue';
+    } catch (error) {
+      console.error('3tap auth request failed', error);
+      authError = 'could not reach the account service';
     } finally {
       authenticating = false;
     }
@@ -1465,7 +1468,7 @@
     clearLocalBoard();
     credentials = null; board = null; entries.clear();
     pendingByCell.clear(); localTapValues.clear(); setQueue([]);
-    authMode = 'login'; authEmail = ''; authDisplayName = ''; authPassword = ''; authError = ''; authNotice = '';
+    authMode = 'login'; authEmail = ''; authPassword = ''; authError = ''; authNotice = '';
   }
 
   function normalizeRecoveryEntry(raw: string) {
@@ -1690,7 +1693,7 @@
     <div class="navbar">
       <div class="brand-slot">
         <button class="brand-button" aria-label="Today" onclick={() => board && void switchView('today')}>3tap</button>
-        {#if loggedIn && credentials}<span class="brand-username">{credentials.displayName || credentials.email}</span>{/if}
+        {#if loggedIn && credentials}<span class="brand-username">{credentials.email}</span>{/if}
       </div>
       {#if loggedIn}
         <nav class="top-tools" aria-label="Pages">
@@ -1808,6 +1811,7 @@
                 >
                   <div
                     class="thought-cell"
+                    role="group"
                     aria-label={`Drag ${thought.text} to reorder`}
                     onpointerdown={(event) => startItemDrag(event, thought.id, 'thought')}
                   >
@@ -2073,11 +2077,7 @@
       <form class="auth-card" onsubmit={(event) => { event.preventDefault(); void submitAuth(); }}>
         <div class="auth-wordmark">3tap</div>
 
-        {#if authMode === 'signup'}
-          <input aria-label="Display name" placeholder="display name (optional)" autocomplete="name" maxlength="40" bind:value={authDisplayName} oninput={() => (authError = '')} />
-        {/if}
-
-        <input aria-label="Email" placeholder="email" type="email" inputmode="email" autocomplete="email" bind:value={authEmail} oninput={() => { authError = ''; authNotice = ''; }} />
+                <input aria-label="Email" placeholder="email" type="email" inputmode="email" autocomplete="email" bind:value={authEmail} oninput={() => { authError = ''; authNotice = ''; }} />
 
         {#if authMode !== 'forgot'}
           <input aria-label="Password" placeholder="password" type="password" autocomplete={authMode === 'login' ? 'current-password' : 'new-password'} bind:value={authPassword} oninput={() => (authError = '')} />
@@ -2130,8 +2130,7 @@
       {#if panel === 'account'}
         <div class="panel-heading">
           <h2>account</h2>
-          <p class="account-identity">{credentials?.displayName || credentials?.email || ''}</p>
-          {#if credentials?.displayName && credentials?.email}<p>{credentials.email}</p>{/if}
+          <p class="account-identity">{credentials?.email || ''}</p>
         </div>
 
         <div class="access-section">
@@ -2399,11 +2398,11 @@
   }
   .auth-card { width: min(280px, 100%); display: grid; gap: 10px; }
   .auth-wordmark { margin-bottom: 16px; text-align: center; color: var(--muted); font-size: 12px; letter-spacing: .12em; }
-  .auth-card input, .account-input {
+  .auth-card input {
     width: 100%; height: 38px; box-sizing: border-box; border: var(--line) solid var(--grid);
     border-radius: 0; outline: 0; background: var(--bg); color: var(--text); padding: 0 10px; font-size: 11px;
   }
-  .auth-card input:focus, .account-input:focus { border-color: var(--control-active); }
+  .auth-card input:focus { border-color: var(--control-active); }
   .auth-submit { height: 38px; border: var(--line) solid var(--grid); color: var(--control-active); font-size: 11px; }
   .auth-submit:disabled { opacity: .45; }
   .auth-switch { justify-self: center; color: var(--muted); font-size: 10px; text-decoration: underline; }
@@ -2414,7 +2413,6 @@
   .auth-links { display: flex; justify-content: center; gap: 18px; }
   .auth-links button { color: var(--muted); font-size: 10px; text-decoration: underline; }
   .account-identity { color: var(--control-active) !important; }
-  .access-section .account-input { margin: 5px 0 12px; }
   @media (max-width: 620px) {
     .brand-slot { width: var(--habit-width); padding-left: 12px; }
     .top-tools { grid-template-columns: repeat(3, var(--day-size)); }
@@ -2662,7 +2660,6 @@
     stroke-linejoin: round;
     pointer-events: none;
   }
-  .tool-icon .icon-fill { fill: currentColor; }
   .tool-icon:active::before { opacity: .18; }
   .tool-icon:focus-visible { outline: none; }
   .tool-icon:focus-visible::before { opacity: .12; }
@@ -3105,8 +3102,7 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   .cell:not(:disabled):active { background: var(--press-fill); }
 
   @media (max-width: 767px) {
-    input,
-    textarea { font-size: 16px; }
+    input { font-size: 16px; }
   }
 
   .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
@@ -3140,55 +3136,10 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
     line-height: 1;
     transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
   }
-  .panel-button-primary { border-color: var(--grid); }
   .panel-button:disabled { opacity: .38; cursor: default; }
   .panel-button:not(:disabled):active { background: var(--press-fill); }
-  .qr { display: block; width: min(250px, 76vw); margin: 10px auto 18px; image-rendering: pixelated; }
-  .pair-qr { border: 1px solid var(--border); }
-  .privacy-note { margin-top: 10px !important; font-size: 10px !important; }
   .access-section { display: grid; justify-items: start; }
   .access-danger-section { padding-bottom: 1px; }
-  .code-box {
-    width: 100%;
-    min-height: 54px;
-    display: flex;
-    align-items: center;
-    margin-bottom: 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .code-box code {
-    min-width: 0;
-    color: var(--control-text);
-    font: inherit;
-    font-size: 10px;
-    line-height: 1.45;
-    overflow-wrap: anywhere;
-    user-select: all;
-  }
-  .restore-code-input {
-    width: 100%;
-    min-height: 54px;
-    resize: none;
-    margin: 0 0 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--border);
-    border-radius: 0;
-    outline: none;
-    background: var(--surface);
-    color: var(--text);
-    font-size: 10px;
-    line-height: 1.45;
-  }
-  .restore-code-input::placeholder { color: var(--muted); opacity: .7; }
-  .restore-code-input:focus { border-color: var(--grid); }
-  .recovery-code-box code {
-    overflow-wrap: anywhere;
-    word-break: break-word;
-    line-height: 1.55;
-  }
-  .recovery-error { margin: 0 0 8px !important; color: var(--danger) !important; font-size: 10px !important; }
   .archive-section,
   .archive-empty-state,
   .archive-danger-section {
