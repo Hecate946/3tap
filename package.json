@@ -10,7 +10,8 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "db:reset": "npx --yes supabase@latest db reset --local",
     "db:stop": "npx --yes supabase@latest stop",
-    "site:zip": "node scripts/site-zip.mjs"
+    "site:zip": "node scripts/site-zip.mjs",
+    "db:push": "npx --yes supabase@latest db push --db-url \"$SUPABASE_DB_URL\" --include-all"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.112.3",

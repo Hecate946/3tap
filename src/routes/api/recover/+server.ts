@@ -1,5 +1,4 @@
 import { error, json, type RequestEvent } from '@sveltejs/kit';
-import { randomBytes } from 'node:crypto';
 import { db, hashSecret } from '$lib/server/db';
 import { getBoard } from '$lib/server/board';
 import { normalizeRecoveryCode } from '$lib/server/recovery';
@@ -18,19 +17,15 @@ export async function POST(event: RequestEvent) {
 
   if (lookupError) throw error(500, lookupError.message || 'Could not check recovery code');
   if (!boardMeta) throw error(404, 'Recovery code not found');
-  const secret = randomBytes(32).toString('base64url');
-  const updatedAt = new Date().toISOString();
-  const { error: updateError } = await db
-    .from('boards')
-    .update({ secret_hash: hashSecret(secret), updated_at: updatedAt })
-    .eq('id', boardMeta.id);
+  // The account key is itself a durable bearer credential. Do not rotate the
+  // board's device secret when another device logs in; existing devices should
+  // keep working and syncing.
 
-  if (updateError) throw error(500, updateError.message || 'Could not recover board');
 
   return json(
     {
-      credentials: { boardId: boardMeta.id, secret, recoveryCode },
-      board: await getBoard(boardMeta.id, { ...boardMeta, updated_at: updatedAt })
+      credentials: { boardId: boardMeta.id, secret: recoveryCode, recoveryCode },
+      board: await getBoard(boardMeta.id, boardMeta)
     },
     { headers: { 'cache-control': 'private, no-store' } }
   );

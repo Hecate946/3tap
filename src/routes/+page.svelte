@@ -37,19 +37,22 @@
 
   let credentials: Credentials | null = fixtureMode ? null : (browser ? getCredentials() : null);
   let board: Board | null = fixtureBoard ?? (browser ? getCachedBoard() : null);
-  if (browser && !fixtureMode && !credentials) {
-    if (board) clearLocalBoard();
-    const fresh = createLocalBoardState();
-    credentials = fresh.credentials;
-    board = fresh.board;
-    setCredentials(credentials);
-    setCachedBoard(board);
+  if (browser && !fixtureMode && !credentials && board) {
+    clearLocalBoard();
+    board = null;
   }
   let online = true;
+  let authMode: 'login' | 'signup' | 'forgot' = 'login';
+  let authEmail = '';
+  let authDisplayName = '';
+  let authPassword = '';
+  let authError = '';
+  let authNotice = '';
+  let authenticating = false;
   let theme: 'light' | 'dark' = 'light';
-  let view: 'habits' | 'thoughts' = 'habits';
+  let view: 'today' | 'history' | 'thoughts' = 'today';
   let navMenuOpen = false;
-  let panel: 'none' | 'access' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
+  let panel: 'none' | 'account' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
   let qrDataUrl = '';
   let pairingLink = '';
   let qrModulePromise: Promise<typeof import('qrcode')> | null = null;
@@ -235,6 +238,7 @@
   $: todayKey = dateKey(currentDay);
   $: yesterdayKey = dateKey(shiftedDate(currentDay, -1));
   $: enrolledKey = enrollmentKey(board);
+  $: loggedIn = Boolean(board && credentials?.email);
 
   function isPreEnrollment(date: string) {
     return Boolean(enrolledKey && date < enrolledKey);
@@ -474,10 +478,7 @@
     if (response.status === 304) return;
     if (!response.ok) {
       if (response.status === 404) {
-        resetToFreshLocalBoard();
-        await tick();
-        await scrollToToday();
-        void ensureBoardRegistered();
+        logOut();
         return;
       }
       if (response.status === 401) return;
@@ -753,12 +754,12 @@
     timelineTouchAxis = '';
   }
 
-  async function switchView(next: 'habits' | 'thoughts') {
+  async function switchView(next: 'today' | 'history' | 'thoughts') {
     if (next === view) return;
-    if (view === 'habits' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
+    if (view === 'history' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
     view = next;
     await tick();
-    if (next === 'habits' && scroller) {
+    if (next === 'history' && scroller) {
       scroller.scrollLeft = savedHabitScrollLeft;
       updateTimelineStatus();
     } else if (scroller) {
@@ -808,15 +809,8 @@
   function openAccess() {
     navMenuOpen = false;
     if (!credentials) return;
-    pairingCopied = false; recoveryInput = credentials.recoveryCode ?? ''; restoreCodeInput = ''; recoveryError = '';
-    recoveryCopied = false; recovering = false; deleteBoardError = ''; panel = 'access';
-    const nextLink = `${location.origin}/pair#${credentials.boardId}.${credentials.secret}`;
-    if (pairingLink !== nextLink) { pairingLink = nextLink; qrDataUrl = ''; }
-    if (!qrDataUrl) void loadQrModule().then(({ toDataURL }) => toDataURL(pairingLink, { width: 280, margin: 1, color: { dark: '#11110f', light: '#f7f7f5' } })).then(url => { if (panel === 'access') qrDataUrl = url; }).catch(() => {});
-    if (navigator.onLine) void (async () => {
-      await flushHabitChanges(); await flushThoughtChanges(); await flushQueue();
-      try { await ensureRecoveryCode(); recoveryInput = credentials?.recoveryCode ?? ''; } catch { recoveryInput = ''; }
-    })();
+    deleteBoardError = '';
+    panel = 'account';
   }
 
   async function copyPairingLink() {
@@ -1045,9 +1039,9 @@
       ? board.habits.find((candidate) => candidate.id === itemId)
       : (board.thoughts ?? []).find((candidate) => candidate.id === itemId);
     const row = kind === 'habit'
-      ? document.querySelector<HTMLElement>(`tr[data-habit-id="${itemId}"]`)
+      ? document.querySelector<HTMLElement>(`[data-habit-id="${itemId}"]`)
       : document.querySelector<HTMLElement>(`.thought-row[data-thought-id="${itemId}"]`);
-    const cell = row?.querySelector<HTMLElement>(kind === 'habit' ? '.habit-name' : '.thought-cell');
+    const cell = row?.querySelector<HTMLElement>(kind === 'habit' ? '.habit-name, .today-habit' : '.thought-cell');
     if (!item || !cell) return;
 
     const rect = cell.getBoundingClientRect();
@@ -1197,7 +1191,7 @@
     const target = event.target as HTMLElement;
     if (kind === 'thought' && target.closest('.thought-controls, input')) return;
     const handle = event.currentTarget as HTMLElement;
-    const dragSurface = handle.closest<HTMLElement>(kind === 'habit' ? '.habit-name' : '.thought-cell') ?? handle;
+    const dragSurface = handle.closest<HTMLElement>(kind === 'habit' ? '.habit-name, .today-habit' : '.thought-cell') ?? handle;
     const rect = dragSurface.getBoundingClientRect();
     if (kind === 'habit' && event.pointerType === 'mouse') event.preventDefault();
     dragPointerId = event.pointerId;
@@ -1375,6 +1369,105 @@
     newHabitName = '';
   }
 
+  function normalizeEmailInput(raw: string) {
+    return raw.trim().toLowerCase().slice(0, 254);
+  }
+
+  const passwordChecks = [
+    ['12+ characters', (value: string) => value.length >= 12],
+    ['one lowercase letter', (value: string) => /[a-z]/.test(value)],
+    ['one uppercase letter', (value: string) => /[A-Z]/.test(value)],
+    ['one number', (value: string) => /[0-9]/.test(value)],
+    ['one symbol', (value: string) => /[^A-Za-z0-9]/.test(value)],
+    ['no spaces', (value: string) => !/\s/.test(value)]
+  ] as const;
+
+  function validPassword(value: string) {
+    return value.length <= 128 && passwordChecks.every(([, test]) => test(value));
+  }
+
+  function loadRecoveredBoard(recovered: { credentials: Credentials; board: Board }) {
+    credentials = recovered.credentials;
+    board = recovered.board;
+    setCredentials(recovered.credentials);
+    setCachedBoard(recovered.board);
+    setQueue([]);
+    pendingByCell.clear();
+    localTapValues.clear();
+    pendingHabitSave = null;
+    pendingThoughtSave = null;
+    setHabitsDirty(false);
+    setThoughtsDirty(false);
+    entries.clear();
+    hydrateEntries(recovered.board);
+  }
+
+  async function submitAuth() {
+    if (authenticating) return;
+    authError = '';
+    authNotice = '';
+    const email = normalizeEmailInput(authEmail);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { authError = 'enter a valid email'; return; }
+    if (!navigator.onLine) { authError = 'connect to the internet to continue'; return; }
+
+    if (authMode === 'forgot') {
+      authenticating = true;
+      try {
+        await fetch('/api/auth/forgot', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) });
+        authNotice = 'if that email has an account, a reset link is on the way';
+      } catch { authError = 'could not send reset link'; }
+      finally { authenticating = false; }
+      return;
+    }
+
+    if (authMode === 'signup' && !validPassword(authPassword)) { authError = 'password does not meet every requirement below'; return; }
+    if (authMode === 'login' && !authPassword) { authError = 'enter your password'; return; }
+
+    authenticating = true;
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(authMode === 'signup'
+          ? { email, displayName: authDisplayName.trim(), password: authPassword }
+          : { email, password: authPassword })
+      });
+      if (!response.ok) {
+        if (response.status === 409) authError = 'an account already exists for this email';
+        else if (response.status === 401) authError = 'incorrect email or password';
+        else {
+          const message = await response.text();
+          authError = message.includes('Email not confirmed') ? 'verify your email before logging in' : 'could not continue';
+        }
+        return;
+      }
+      const data = (await response.json()) as { credentials?: Credentials; board?: Board; verificationRequired?: boolean };
+      if (data.verificationRequired) {
+        authMode = 'login';
+        authPassword = '';
+        authNotice = 'check your email to verify your account, then log in';
+        return;
+      }
+      if (data.credentials && data.board) loadRecoveredBoard({ credentials: data.credentials, board: data.board });
+      authPassword = '';
+      authDisplayName = '';
+      await tick();
+      await scrollToToday();
+    } catch {
+      authError = 'could not continue';
+    } finally {
+      authenticating = false;
+    }
+  }
+
+  function logOut() {
+    navMenuOpen = false; panel = 'none';
+    clearLocalBoard();
+    credentials = null; board = null; entries.clear();
+    pendingByCell.clear(); localTapValues.clear(); setQueue([]);
+    authMode = 'login'; authEmail = ''; authDisplayName = ''; authPassword = ''; authError = ''; authNotice = '';
+  }
+
   function normalizeRecoveryEntry(raw: string) {
     return raw
       .trim()
@@ -1389,11 +1482,11 @@
     recoveryError = '';
     const code = normalizeRecoveryEntry(restoreCodeInput);
     if (!code) {
-      recoveryError = 'Enter your recovery code.';
+      recoveryError = 'Enter your account key.';
       return;
     }
     if (!navigator.onLine) {
-      recoveryError = 'Connect to the internet to recover this board.';
+      recoveryError = 'Connect to the internet to log in.';
       return;
     }
 
@@ -1405,32 +1498,25 @@
         body: JSON.stringify({ code })
       });
       if (response.status === 404) {
-        recoveryError = 'That recovery code was not found.';
+        recoveryError = 'That account key was not found.';
         return;
       }
       if (!response.ok) throw new Error(await response.text());
 
-      const recovered = (await response.json()) as { credentials: Credentials; board: Board };
-      credentials = recovered.credentials;
-      board = recovered.board;
-      setCredentials(recovered.credentials);
-      setCachedBoard(recovered.board);
-      setQueue([]);
-      pendingByCell.clear();
-      localTapValues.clear();
-      pendingHabitSave = null;
-      pendingThoughtSave = null;
-      setHabitsDirty(false);
-      setThoughtsDirty(false);
-      entries.clear();
-      hydrateEntries(recovered.board);
+      const recovered = (await response.json()) as { credentials: Credentials; board?: Board };
+      if (recovered.board) loadRecoveredBoard({ credentials: recovered.credentials, board: recovered.board });
+      else if (board) {
+        credentials = recovered.credentials;
+        setCredentials(recovered.credentials);
+        setCachedBoard(board);
+      }
       qrDataUrl = '';
       pairingLink = '';
       panel = 'none';
       await tick();
       await scrollToToday();
     } catch {
-      recoveryError = 'Could not recover this board. Try again.';
+      recoveryError = 'Could not log in. Try again.';
     } finally {
       recovering = false;
     }
@@ -1460,8 +1546,8 @@
         const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}`, { method: 'DELETE', headers: authHeaders(credentials) });
         if (!response.ok && response.status !== 404) throw new Error(await apiErrorMessage(response, 'Could not delete this board.'));
       }
-      resetToFreshLocalBoard(); panel = 'none'; deletingBoard = false;
-      await tick(); await scrollToToday(); void ensureBoardRegistered();
+      deletingBoard = false;
+      logOut();
     } catch (error) { deleteBoardError = error instanceof Error && error.message ? error.message : 'Could not delete this board. Try again.'; deletingBoard = false; }
   }
 
@@ -1505,8 +1591,8 @@
       return;
     }
     online = navigator.onLine;
-    if (!credentials) resetToFreshLocalBoard();
-    if (!board && credentials && navigator.onLine) { try { await fetchBoard(); } catch { online = navigator.onLine; } }
+    if (!credentials) { board = null; return; }
+    if (!board && navigator.onLine) { try { await fetchBoard(); } catch { online = navigator.onLine; } }
     if (board) await scrollToToday();
     void sync();
   }
@@ -1514,12 +1600,6 @@
   onMount(() => {
     theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
     void initialize();
-    if (!fixtureMode) {
-      const prewarmQr = () => void loadQrModule();
-      if ((window as any).requestIdleCallback) (window as any).requestIdleCallback(prewarmQr, { timeout: 2500 });
-      else setTimeout(prewarmQr, 1200);
-    }
-
     const onFocus = () => void sync();
     const onOnline = () => credentials ? void sync() : void initialize();
     const onOffline = () => (online = false);
@@ -1605,42 +1685,59 @@
 </svelte:head>
 
 <div class="shell">
+  {#if loggedIn}
   <header class="nav-shell">
     <div class="navbar">
       <div class="brand-slot">
-        <button class="brand-button" aria-label="Habits" onclick={() => void switchView('habits')}>3tap</button>
+        <button class="brand-button" aria-label="Today" onclick={() => board && void switchView('today')}>3tap</button>
+        {#if loggedIn && credentials}<span class="brand-username">{credentials.displayName || credentials.email}</span>{/if}
       </div>
-      <div class="nav-actions">
-        <button
-          class="nav-more"
-          aria-label="More"
-          aria-haspopup="menu"
-          aria-expanded={navMenuOpen}
-          onclick={() => (navMenuOpen = !navMenuOpen)}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="6" cy="12" r="1.35"></circle>
-            <circle cx="12" cy="12" r="1.35"></circle>
-            <circle cx="18" cy="12" r="1.35"></circle>
-          </svg>
-        </button>
-        {#if navMenuOpen}
-          <div class="nav-menu" role="menu" aria-label="More">
-            <button role="menuitem" onclick={openAccess}>access</button>
-            <button role="menuitem" onclick={openArchived}>archive</button>
-          </div>
-        {/if}
-      </div>
+      {#if loggedIn}
+        <nav class="top-tools" aria-label="Pages">
+          <button class="tool-icon habits-tool" class:active={view === 'today'} aria-label="Today" aria-pressed={view === 'today'} title="Today" onclick={() => void switchView('today')}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6"></rect><rect x="14" y="4" width="6" height="6"></rect><rect x="4" y="14" width="6" height="6"></rect><rect x="14" y="14" width="6" height="6"></rect></svg>
+          </button>
+          <button class="tool-icon thoughts-tool" class:active={view === 'thoughts'} aria-label="Thoughts" aria-pressed={view === 'thoughts'} title="Thoughts" onclick={() => void switchView('thoughts')}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
+          </button>
+          <button class="tool-icon history-tool" class:active={view === 'history'} aria-label="History" aria-pressed={view === 'history'} title="History" onclick={() => void switchView('history')}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path><path d="M8 4v16M14 4v16"></path></svg>
+          </button>
+        </nav>
+        <div class="nav-actions">
+          <button class="nav-more" aria-label="Menu" aria-haspopup="menu" aria-expanded={navMenuOpen} onclick={() => (navMenuOpen = !navMenuOpen)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"></path></svg>
+          </button>
+          {#if navMenuOpen}
+            <div class="nav-menu icon-menu" role="menu" aria-label="Menu">
+              <button class="menu-icon-button theme-tool" role="menuitem" aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} title={theme === 'dark' ? 'Light theme' : 'Dark theme'} onclick={() => { toggleTheme(); navMenuOpen = false; }}>
+                {#if theme === 'dark'}
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" class="icon-fill"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>
+                {:else}
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path></svg>
+                {/if}
+              </button>
+              <button class="menu-icon-button archive-menu-button" role="menuitem" aria-label="Archive" title="Archive" onclick={openArchived}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14v13H5zM4 4h16v4H4zM9 11h6"></path></svg>
+              </button>
+              <button class="menu-icon-button logout-menu-button" role="menuitem" aria-label="Log out" title="Log out" onclick={logOut}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M13 8l4 4-4 4M8 12h9"></path></svg>
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
   </header>
+  {/if}
 
-  {#if board}
+  {#if loggedIn}
     <main>
       <div
         class="grid-scroll"
-        class:thoughts-mode={view === 'thoughts'}
+        class:thoughts-mode={view !== 'history'}
         role="region"
-        aria-label={view === 'habits' ? 'Habit timeline' : 'Thoughts'}
+        aria-label={view === 'history' ? 'Habit history' : view === 'thoughts' ? 'Thoughts' : 'Today'}
         bind:this={scroller}
         onscroll={onTimelineScroll}
         onpointerdown={startTimelinePan}
@@ -1651,55 +1748,9 @@
         <div class="grid-frame">
           <div class="timeline-header" aria-label="Timeline">
             <div class="timeline-side">
-              <nav class="timeline-controls" aria-label="Pages">
-                <button
-                  class="tool-icon habits-tool"
-                  class:active={view === 'habits'}
-                  aria-label="Habits"
-                  aria-pressed={view === 'habits'}
-                  title="Habits"
-                  onclick={() => void switchView('habits')}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="4" y="4" width="6" height="6"></rect>
-                    <rect x="14" y="4" width="6" height="6"></rect>
-                    <rect x="4" y="14" width="6" height="6"></rect>
-                    <rect x="14" y="14" width="6" height="6"></rect>
-                  </svg>
-                </button>
-                <button
-                  class="tool-icon thoughts-tool"
-                  class:active={view === 'thoughts'}
-                  aria-label="Thoughts"
-                  aria-pressed={view === 'thoughts'}
-                  title="Thoughts"
-                  onclick={() => void switchView('thoughts')}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
-                </button>
-                <button
-                  class="tool-icon theme-tool"
-                  aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-                  title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
-                  onclick={toggleTheme}
-                >
-                  {#if theme === 'dark'}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
-                      <path d="M12 2v2"></path><path d="M12 20v2"></path>
-                      <path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path>
-                      <path d="M2 12h2"></path><path d="M20 12h2"></path>
-                      <path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path>
-                    </svg>
-                  {:else}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path>
-                    </svg>
-                  {/if}
-                </button>
-              </nav>
+              <div class="timeline-side-spacer" aria-hidden="true"></div>
             </div>
-            {#if view === 'habits'}
+            {#if view === 'history'}
             <div class="timeline-main-header">
               <div class="timeline-meta-row">
                 <div class="start-slot">
@@ -1735,6 +1786,11 @@
                 {/each}
               </div>
             </div>
+            {:else if view === 'today'}
+              <div class="today-header">
+                <span>{WEEKDAY_LABELS[currentDay.getDay()]} {currentDay.getDate()} {monthOptions[currentDay.getMonth()]}</span>
+                {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
+              </div>
             {:else if view === 'thoughts'}
               <div class="thoughts-header">
                 {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
@@ -1801,6 +1857,53 @@
                   />
                 {:else}
                   <button class="add-thought" onclick={beginAddThought}>+ thought</button>
+                {/if}
+              </div>
+            </div>
+          {:else if view === 'today'}
+            <div class="today-list" aria-label="Today's habits">
+              {#each board.habits as habit, habitIndex (habit.id)}
+                {@const value = valueFor(habit.id, todayKey)}
+                <div class="today-row" data-habit-id={habit.id} animate:flip={{ duration: dragActive ? 120 : 0 }}>
+                  <div class="today-habit">
+                    {#if editingHabitId === habit.id}
+                      <input
+                        class="habit-inline-input"
+                        bind:this={editHabitInput}
+                        bind:value={editingHabitName}
+                        aria-label={`Rename ${habit.name}`}
+                        onblur={commitRename}
+                        enterkeyhint="done"
+                        onkeydown={(event) => {
+                          if (event.key === 'Enter') { event.preventDefault(); finishInlineEditFromKeyboard(event.currentTarget); }
+                          if (event.key === 'Escape') { editingHabitId = null; editingHabitName = ''; }
+                        }}
+                      />
+                    {:else}
+                      <button class="today-habit-label" onclick={() => beginRename(habit)}>{habit.name}</button>
+                    {/if}
+                    <div class="today-habit-controls">
+                      <button class="drag-habit" aria-label={`Hold and drag to reorder ${habit.name}`} title="Hold and drag to reorder" onpointerdown={(event) => startItemDrag(event, habit.id, 'habit')}>
+                        <svg class="row-drag-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1"/><circle cx="11" cy="4" r="1"/><circle cx="5" cy="8" r="1"/><circle cx="11" cy="8" r="1"/><circle cx="5" cy="12" r="1"/><circle cx="11" cy="12" r="1"/></svg>
+                      </button>
+                      <button class="delete-habit" aria-label={`Archive ${habit.name}`} title="Archive" onclick={() => archiveHabit(habitIndex)}>
+                        <svg class="row-archive-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.25 5.25h7.5v7.25h-7.5z"/><path d="M5.25 3.25h5.5"/><path d="M8 7v3.25"/><path d="m6.5 8.75 1.5 1.5 1.5-1.5"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    class="today-mark"
+                    class:plus={value === 2}
+                    aria-label={`${habit.name}, today: ${symbols[value]}`}
+                    onclick={(event) => tapCell(habit.id, todayKey, event.currentTarget)}
+                  >{symbols[value]}</button>
+                </div>
+              {/each}
+              <div class="today-add-row">
+                {#if addingHabit}
+                  <input class="habit-inline-input add-input" bind:this={newHabitInput} bind:value={newHabitName} placeholder="habit" aria-label="New habit" onblur={commitAddHabit} onkeydown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') cancelAddHabit(); }} />
+                {:else}
+                  <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
                 {/if}
               </div>
             </div>
@@ -1954,19 +2057,58 @@
           {/if}
         </div>
       </div>
-      {#if view === 'habits' && board.habits.length === 0}
+      {#if view === 'today' && board.habits.length === 0}
         <section class="zero-tutorial" aria-label="Getting started">
           <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
           <ul class="zero-tutorial-list">
-            <li>tap today or yesterday: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
-            <li>older days lock</li>
+            <li>tap a habit: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
+            <li>history keeps the full timeline</li>
             <li>tap a habit name to rename; drag it to reorder</li>
           </ul>
         </section>
       {/if}
     </main>
   {:else}
-    <main></main>
+    <main class="auth-page">
+      <form class="auth-card" onsubmit={(event) => { event.preventDefault(); void submitAuth(); }}>
+        <div class="auth-wordmark">3tap</div>
+
+        {#if authMode === 'signup'}
+          <input aria-label="Display name" placeholder="display name (optional)" autocomplete="name" maxlength="40" bind:value={authDisplayName} oninput={() => (authError = '')} />
+        {/if}
+
+        <input aria-label="Email" placeholder="email" type="email" inputmode="email" autocomplete="email" bind:value={authEmail} oninput={() => { authError = ''; authNotice = ''; }} />
+
+        {#if authMode !== 'forgot'}
+          <input aria-label="Password" placeholder="password" type="password" autocomplete={authMode === 'login' ? 'current-password' : 'new-password'} bind:value={authPassword} oninput={() => (authError = '')} />
+        {/if}
+
+        {#if authMode === 'signup'}
+          <ul class="password-rules" aria-label="Password requirements">
+            {#each passwordChecks as [label, test]}
+              <li class:valid={test(authPassword)}>{test(authPassword) ? '✓' : '·'} {label}</li>
+            {/each}
+            <li class:valid={authPassword.length > 0 && authPassword.length <= 128}>{authPassword.length > 0 && authPassword.length <= 128 ? '✓' : '·'} 128 characters max</li>
+          </ul>
+        {/if}
+
+        {#if authError}<p class="auth-error" role="alert">{authError}</p>{/if}
+        {#if authNotice}<p class="auth-notice" role="status">{authNotice}</p>{/if}
+
+        <button class="auth-submit" type="submit" disabled={authenticating || (authMode === 'signup' && !validPassword(authPassword))}>
+          {authenticating ? '...' : authMode === 'login' ? 'log in' : authMode === 'signup' ? 'create account' : 'send reset link'}
+        </button>
+
+        {#if authMode === 'login'}
+          <div class="auth-links">
+            <button type="button" onclick={() => { authMode = 'signup'; authError = ''; authNotice = ''; authPassword = ''; }}>create account</button>
+            <button type="button" onclick={() => { authMode = 'forgot'; authError = ''; authNotice = ''; authPassword = ''; }}>forgot password</button>
+          </div>
+        {:else}
+          <button class="auth-switch" type="button" onclick={() => { authMode = 'login'; authError = ''; authNotice = ''; authPassword = ''; }}>back to log in</button>
+        {/if}
+      </form>
+    </main>
   {/if}
 
   {#if dragActive}
@@ -1985,61 +2127,20 @@
     <section class="panel" aria-modal="true" role="dialog">
       <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
 
-      {#if panel === 'access'}
+      {#if panel === 'account'}
         <div class="panel-heading">
-          <h2>access</h2>
-          <p>Take this board with you, keep a backup, or open another one.</p>
+          <h2>account</h2>
+          <p class="account-identity">{credentials?.displayName || credentials?.email || ''}</p>
+          {#if credentials?.displayName && credentials?.email}<p>{credentials.email}</p>{/if}
         </div>
 
         <div class="access-section">
-          <div class="panel-label">add device</div>
-          <p class="section-help">Scan this on another device to bring this board with you. Both devices stay in sync.</p>
-          {#if qrDataUrl}<img class="qr pair-qr" src={qrDataUrl} alt="QR code for pairing another device" />{/if}
-          <button class="panel-button panel-button-primary" disabled={!pairingLink} onclick={copyPairingLink}>
-            {pairingCopied ? 'link copied' : pairingLink ? 'copy pairing link' : 'preparing…'}
-          </button>
-          <p class="privacy-note">Treat the QR like a key — anyone with it can open this board.</p>
+          <button class="panel-button" onclick={logOut}>log out</button>
         </div>
 
         <div class="panel-divider"></div>
-
-        <div class="access-section">
-          <div class="panel-label">recovery code</div>
-          <p class="section-help">Save this somewhere safe. Use it if you lose access to all of your devices.</p>
-          <div class="code-box recovery-code-box">
-            <code>{recoveryInput || 'connect to load recovery code'}</code>
-          </div>
-          <button class="panel-button" disabled={!recoveryInput} onclick={copyRecoveryCode}>{recoveryCopied ? 'copied ✓' : 'copy recovery code'}</button>
-        </div>
-
-        <div class="panel-divider"></div>
-
-        <div class="access-section">
-          <label class="panel-label" for="restore-code">recover a board</label>
-          <p class="section-help">Paste its recovery code here. Recovery creates a fresh device key, so previously paired devices will need to be added again.</p>
-          <textarea
-            id="restore-code"
-            class="restore-code-input"
-            bind:value={restoreCodeInput}
-            rows="2"
-            spellcheck="false"
-            autocomplete="off"
-            autocapitalize="none"
-            placeholder="winter_donkey_maple_cloud..."
-            oninput={() => (recoveryError = '')}
-          ></textarea>
-          {#if recoveryError}<p class="recovery-error" role="alert">{recoveryError}</p>{/if}
-          <button class="panel-button panel-button-primary" disabled={recovering || !restoreCodeInput.trim()} onclick={useRecoveryCode}>
-            {recovering ? 'recovering…' : 'recover board'}
-          </button>
-        </div>
-
-        <div class="panel-divider"></div>
-
         <div class="access-section access-danger-section">
-          <div class="panel-label">delete board</div>
-          <p class="section-help">Permanently delete this board, every habit, and all history from 3tap.</p>
-          <button class="panel-button panel-button-danger" onclick={confirmDeleteBoard}>delete board</button>
+          <button class="panel-button panel-button-danger" onclick={confirmDeleteBoard}>delete account</button>
         </div>
       {:else if panel === 'archived'}
         <div class="panel-heading">
@@ -2102,13 +2203,13 @@
           </button>
         </div>
       {:else if panel === 'delete-board'}
-        <h2>delete this board?</h2>
-        <p>This permanently deletes every habit, thought, and all history on every paired device. This device will start with a new empty board.</p>
+        <h2>delete this account?</h2>
+        <p>This permanently deletes every habit, thought, and all history in this account. This device will start with a new empty account.</p>
         {#if deleteBoardError}<p class="archive-error" role="alert">{deleteBoardError}</p>{/if}
         <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'access')}>cancel</button>
+          <button class="panel-button" onclick={() => (panel = 'account')}>cancel</button>
           <button class="panel-button panel-button-danger" disabled={deletingBoard} onclick={deleteBoardForever}>
-            {deletingBoard ? 'deleting…' : 'delete board'}
+            {deletingBoard ? 'deleting…' : 'delete account'}
           </button>
         </div>
       {/if}
@@ -2261,6 +2362,65 @@
     outline: 1px solid var(--control-active);
     outline-offset: -2px;
   }
+  .brand-slot {
+    gap: 10px;
+  }
+  .brand-username {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--timeline-text);
+    font-size: 9px;
+    letter-spacing: 0;
+  }
+  .top-tools {
+    position: absolute;
+    top: env(safe-area-inset-top);
+    left: 50%;
+    transform: translateX(-50%);
+    height: var(--day-size);
+    display: grid;
+    grid-template-columns: repeat(3, var(--day-size));
+  }
+  .top-tools .tool-icon {
+    width: var(--day-size);
+    height: var(--day-size);
+    border-left: var(--line) solid var(--grid);
+  }
+  .top-tools .tool-icon:last-child { border-right: var(--line) solid var(--grid); }
+  .timeline-side-spacer { width: 100%; height: 100%; }
+  .auth-page {
+    min-height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  .auth-card { width: min(280px, 100%); display: grid; gap: 10px; }
+  .auth-wordmark { margin-bottom: 16px; text-align: center; color: var(--muted); font-size: 12px; letter-spacing: .12em; }
+  .auth-card input, .account-input {
+    width: 100%; height: 38px; box-sizing: border-box; border: var(--line) solid var(--grid);
+    border-radius: 0; outline: 0; background: var(--bg); color: var(--text); padding: 0 10px; font-size: 11px;
+  }
+  .auth-card input:focus, .account-input:focus { border-color: var(--control-active); }
+  .auth-submit { height: 38px; border: var(--line) solid var(--grid); color: var(--control-active); font-size: 11px; }
+  .auth-submit:disabled { opacity: .45; }
+  .auth-switch { justify-self: center; color: var(--muted); font-size: 10px; text-decoration: underline; }
+  .auth-error { min-height: 12px; margin: 0; color: var(--danger); font-size: 10px; }
+  .auth-notice { margin: 0; color: var(--control-active); font-size: 10px; line-height: 1.5; }
+  .password-rules { list-style: none; margin: -2px 0 2px; padding: 0; color: var(--muted); font-size: 9px; line-height: 1.65; }
+  .password-rules li.valid { color: var(--control-active); }
+  .auth-links { display: flex; justify-content: center; gap: 18px; }
+  .auth-links button { color: var(--muted); font-size: 10px; text-decoration: underline; }
+  .account-identity { color: var(--control-active) !important; }
+  .access-section .account-input { margin: 5px 0 12px; }
+  @media (max-width: 620px) {
+    .brand-slot { width: var(--habit-width); padding-left: 12px; }
+    .top-tools { grid-template-columns: repeat(3, var(--day-size)); }
+    .top-tools .tool-icon { width: var(--day-size); }
+  }
+
   .nav-actions {
     position: absolute;
     top: env(safe-area-inset-top);
@@ -2278,29 +2438,47 @@
   .nav-more svg {
     width: 20px;
     height: 20px;
-    fill: currentColor;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: square;
   }
   .nav-menu {
     position: absolute;
     z-index: 90;
     top: var(--day-size);
-    right: 8px;
-    width: 88px;
+    right: 0;
     background: var(--bg);
-    border: var(--line) solid var(--grid);
+    border-left: var(--line) solid var(--grid);
+    border-bottom: var(--line) solid var(--grid);
   }
-  .nav-menu button {
-    width: 100%;
-    height: 30px;
-    padding: 0 10px;
-    display: flex;
-    align-items: center;
+  .nav-menu.icon-menu {
+    width: var(--day-size);
+    display: grid;
+    grid-template-columns: var(--day-size);
+  }
+  .nav-menu .menu-icon-button {
+    width: var(--day-size);
+    height: var(--day-size);
+    display: grid;
+    place-items: center;
     border-bottom: var(--line) solid var(--grid);
     color: var(--control-text);
-    font-size: 10px;
-    text-align: left;
   }
-  .nav-menu button:last-child { border-bottom: 0; }
+  .nav-menu .menu-icon-button:last-child { border-bottom: 0; }
+  .nav-menu .menu-icon-button svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+  }
+  .nav-menu .theme-tool { color: var(--icon-theme); }
+  .nav-menu .theme-tool .icon-fill { fill: currentColor; }
+  .nav-menu .logout-menu-button { color: var(--muted); }
+  .nav-menu .archive-menu-button { color: var(--icon-archive); }
   .start-slot,
   .month-nav,
   .month-slot,
@@ -2443,14 +2621,7 @@
     background: var(--grid);
     pointer-events: none;
   }
-  .timeline-controls {
-    width: 100%;
-    height: var(--day-size);
-    margin-top: 0;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-items: stretch;
-  }
+
   .tool-icon {
     position: relative;
     width: 100%;
@@ -2473,6 +2644,8 @@
   }
   .habits-tool { color: var(--icon-habits); }
   .habits-tool.active::before { opacity: .10; }
+  .history-tool { color: var(--icon-habits); }
+  .history-tool.active::before { opacity: .10; }
   .thoughts-tool { color: var(--icon-thoughts); }
   .thoughts-tool.active::before { opacity: .10; }
   .theme-tool { color: var(--icon-theme); }
@@ -3087,4 +3260,37 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   .archive-toast strong { font-weight: 600; }
   .archive-toast button { flex: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 
+
+  .today-header {
+    flex: 1; min-width: 0; height: var(--day-size); padding: 0 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--control-text); font-size: 11px; letter-spacing: .02em;
+  }
+  .today-list { width: min(100%, 680px); border-right: var(--line) solid var(--grid); }
+  .today-row {
+    height: var(--day-size); display: grid; grid-template-columns: minmax(0, 1fr) var(--day-size);
+    border-bottom: var(--line) solid var(--grid); background: var(--bg);
+  }
+  .today-habit { min-width: 0; padding: 0 8px 0 var(--page-inset); display: flex; align-items: center; gap: 5px; }
+  .today-habit-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: 12px; font-weight: 500; }
+  .today-habit-controls { margin-left: auto; display: grid; grid-template-columns: repeat(2, 30px); align-items: center; opacity: .72; }
+  .today-habit-controls button { width: 30px; height: 36px; display: grid; place-items: center; color: var(--control-text); }
+  .today-habit-controls svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+  .today-habit-controls .row-drag-icon { fill: currentColor; stroke: none; }
+  .today-mark {
+    position: relative; display: grid; place-items: center; width: var(--day-size); height: var(--day-size);
+    border-left: var(--line) solid var(--grid); background: var(--today-fill); color: var(--today-accent);
+    font-size: 16px; font-weight: 600; -webkit-tap-highlight-color: transparent;
+  }
+  .today-mark.plus { font-size: 18px; }
+  .today-mark:active { background: var(--press-fill); }
+  .today-add-row { height: var(--day-size); padding: 0 var(--page-inset); display: flex; align-items: center; border-bottom: var(--line) solid var(--grid); }
+  @media (hover: hover) and (pointer: fine) {
+    .today-row:hover .today-habit-controls { opacity: 1; }
+    .today-mark:hover { background: var(--hover); }
+  }
+  @media (max-width: 560px) {
+    .today-list { width: 100%; border-right: 0; }
+    .today-habit-controls { opacity: .68; }
+  }
 </style>

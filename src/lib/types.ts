@@ -36,4 +36,6 @@ export type Credentials = {
   secret: string;
   recoveryCode?: string;
   pendingCreate?: boolean;
+  email?: string;
+  displayName?: string;
 };

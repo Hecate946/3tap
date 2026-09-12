@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { env } from '$env/dynamic/private';
 import { error, type RequestEvent } from '@sveltejs/kit';
@@ -39,6 +39,32 @@ export function hashSecret(secret: string) {
   return createHash('sha256').update(secret).digest('hex');
 }
 
+
+export function normalizeUsername(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+}
+
+export function hashPassword(password: string) {
+  const salt = randomBytes(16).toString('hex');
+  const derived = scryptSync(password, salt, 32).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+export function verifyPassword(password: string, stored: string) {
+  const [salt, expectedHex] = stored.split(':');
+  if (!salt || !expectedHex) return false;
+  const actual = scryptSync(password, salt, 32);
+  const expected = Buffer.from(expectedHex, 'hex');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+export async function createSession(boardId: string) {
+  const token = randomBytes(32).toString('base64url');
+  const { error: sessionError } = await db.from('board_sessions').insert({ board_id: boardId, token_hash: hashSecret(token) });
+  if (sessionError) throw error(500, sessionError.message);
+  return token;
+}
+
 export function readSecret(request: Request) {
   const auth = request.headers.get('authorization');
   if (!auth?.startsWith('Bearer ')) throw error(401, 'Missing board key');
@@ -51,18 +77,52 @@ export async function assertBoard(event: RequestEvent, boardId: string) {
   const secret = readSecret(event.request);
   const { data, error: dbError } = await db
     .from('boards')
-    .select('id, secret_hash, created_at, updated_at')
+    .select('id, secret_hash, recovery_hash, created_at, updated_at')
     .eq('id', boardId)
     .maybeSingle();
 
   if (dbError) throw error(500, dbError.message);
   if (!data) throw error(404, 'Board not found');
 
-  const expected = Buffer.from(data.secret_hash, 'hex');
   const actual = Buffer.from(hashSecret(secret), 'hex');
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
-    throw error(401, 'Invalid board key');
+  const acceptedHashes = [data.secret_hash, data.recovery_hash].filter((value): value is string => typeof value === 'string' && value.length > 0);
+  const valid = acceptedHashes.some((hash) => {
+    const expected = Buffer.from(hash, 'hex');
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  });
+  if (!valid) {
+    const { data: session, error: sessionError } = await db
+      .from('board_sessions')
+      .select('board_id')
+      .eq('board_id', boardId)
+      .eq('token_hash', hashSecret(secret))
+      .maybeSingle();
+    if (sessionError) throw error(500, sessionError.message);
+    if (!session) throw error(401, 'Invalid session');
   }
 
   return data;
+}
+
+export function createAuthClient() {
+  return createClient(
+    requireEnv('SUPABASE_URL'),
+    requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
+    { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }
+  );
+}
+
+export function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function validatePassword(password: string) {
+  if (password.length < 12) return 'Password must be at least 12 characters';
+  if (password.length > 128) return 'Password must be 128 characters or fewer';
+  if (!/[a-z]/.test(password)) return 'Password needs a lowercase letter';
+  if (!/[A-Z]/.test(password)) return 'Password needs an uppercase letter';
+  if (!/[0-9]/.test(password)) return 'Password needs a number';
+  if (!/[^A-Za-z0-9]/.test(password)) return 'Password needs a symbol';
+  if (/\s/.test(password)) return 'Password cannot contain spaces';
+  return null;
 }
