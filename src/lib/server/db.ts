@@ -40,10 +40,6 @@ export function hashSecret(secret: string) {
 }
 
 
-export function normalizeUsername(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-}
-
 export function hashPassword(password: string) {
   const salt = randomBytes(16).toString('hex');
   const derived = scryptSync(password, salt, 32).toString('hex');
@@ -61,7 +57,10 @@ export function verifyPassword(password: string, stored: string) {
 export async function createSession(boardId: string) {
   const token = randomBytes(32).toString('base64url');
   const { error: sessionError } = await db.from('board_sessions').insert({ board_id: boardId, token_hash: hashSecret(token) });
-  if (sessionError) throw error(500, sessionError.message);
+  if (sessionError) {
+    console.error('3tap session creation failed:', sessionError);
+    throw error(500, 'Could not create login session');
+  }
   return token;
 }
 
@@ -97,19 +96,14 @@ export async function assertBoard(event: RequestEvent, boardId: string) {
       .eq('board_id', boardId)
       .eq('token_hash', hashSecret(secret))
       .maybeSingle();
-    if (sessionError) throw error(500, sessionError.message);
+    if (sessionError) {
+      console.error('3tap session lookup failed:', sessionError);
+      throw error(500, 'Could not validate login session');
+    }
     if (!session) throw error(401, 'Invalid session');
   }
 
   return data;
-}
-
-export function createAuthClient() {
-  return createClient(
-    requireEnv('SUPABASE_URL'),
-    requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
-    { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }
-  );
 }
 
 export function normalizeEmail(value: string) {

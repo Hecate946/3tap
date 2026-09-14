@@ -14,14 +14,12 @@
     "db:push": "npx --yes supabase@latest db push --db-url \"$SUPABASE_DB_URL\" --include-all"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.112.3",
-    "qrcode": "1.5.4"
+    "@supabase/supabase-js": "2.112.3"
   },
   "devDependencies": {
     "@sveltejs/adapter-cloudflare": "7.2.9",
     "@sveltejs/kit": "2.70.3",
     "@sveltejs/vite-plugin-svelte": "7.2.0",
-    "@types/qrcode": "1.5.5",
     "svelte": "5.56.10",
     "svelte-check": "4.3.3",
     "typescript": "5.9.2",

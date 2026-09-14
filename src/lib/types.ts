@@ -34,8 +34,6 @@ export type Board = {
 export type Credentials = {
   boardId: string;
   secret: string;
-  recoveryCode?: string;
   pendingCreate?: boolean;
   email?: string;
-  displayName?: string;
 };

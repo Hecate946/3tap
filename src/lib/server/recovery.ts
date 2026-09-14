@@ -32,7 +32,7 @@ export function normalizeRecoveryCode(value: string) {
 }
 
 export function generateRecoveryCode() {
-  const bytes = randomBytes(8);
+  const bytes = randomBytes(10);
   const parts: string[] = [];
   for (let i = 0; i < bytes.length; i += 1) {
     const index = bytes[i] & 0x7f;

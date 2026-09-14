@@ -1,5 +1,5 @@
 import { error, json, type RequestEvent } from '@sveltejs/kit';
-import { createAuthClient, createSession, db, normalizeEmail } from '$lib/server/db';
+import { createSession, db, normalizeEmail, verifyPassword } from '$lib/server/db';
 import { getBoard } from '$lib/server/board';
 
 export async function POST(event: RequestEvent) {
@@ -8,20 +8,16 @@ export async function POST(event: RequestEvent) {
   const password = typeof body?.password === 'string' ? body.password : '';
   if (!email || !password) throw error(400, 'Email and password are required');
 
-  const auth = createAuthClient();
-  const { data: authData, error: authError } = await auth.auth.signInWithPassword({ email, password });
-  if (authError || !authData.user) throw error(401, 'Incorrect email or password');
-
   const { data, error: lookupError } = await db.from('boards')
-    .select('id, email, display_name, created_at, updated_at')
-    .eq('auth_user_id', authData.user.id)
+    .select('id, email, password_hash, created_at, updated_at')
+    .ilike('email', email)
     .maybeSingle();
-  if (lookupError) throw error(500, lookupError.message);
-  if (!data) throw error(404, 'Account data was not found');
+  if (lookupError) throw error(500, 'Could not log in');
+  if (!data?.password_hash || !verifyPassword(password, data.password_hash)) throw error(401, 'Incorrect email or password');
 
   const secret = await createSession(data.id);
   return json({
-    credentials: { boardId: data.id, secret, email: data.email ?? email, displayName: data.display_name ?? undefined },
+    credentials: { boardId: data.id, secret, email: data.email ?? email },
     board: await getBoard(data.id, data)
   }, { headers: { 'cache-control': 'private, no-store' } });
 }

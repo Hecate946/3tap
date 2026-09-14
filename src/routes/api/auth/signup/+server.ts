@@ -1,9 +1,25 @@
 import { error, json, type RequestEvent } from '@sveltejs/kit';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { createAuthClient, createSession, db, hashSecret, normalizeEmail, validatePassword } from '$lib/server/db';
+import { createSession, db, hashPassword, hashSecret, normalizeEmail, validatePassword, verifyPassword } from '$lib/server/db';
 import { getBoard } from '$lib/server/board';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+type ExistingBoard = {
+  id: string;
+  email: string | null;
+  password_hash: string | null;
+  created_at: string;
+  updated_at: string | null;
+};
+
+async function finishAccount(board: ExistingBoard, email: string) {
+  const secret = await createSession(board.id);
+  return json({
+    credentials: { boardId: board.id, secret, email: board.email ?? email },
+    board: await getBoard(board.id, board)
+  }, { headers: { 'cache-control': 'private, no-store' } });
+}
 
 export async function POST(event: RequestEvent) {
   const body = (await event.request.json().catch(() => null)) as { email?: unknown; password?: unknown } | null;
@@ -13,45 +29,52 @@ export async function POST(event: RequestEvent) {
   const passwordError = validatePassword(password);
   if (passwordError) throw error(400, passwordError);
 
-  const auth = createAuthClient();
-  const { data: authData, error: authError } = await auth.auth.signUp({
-    email,
-    password,
-    options: { emailRedirectTo: event.url.origin }
-  });
-  if (authError) {
-    const message = authError.message.toLowerCase();
-    if (message.includes('registered') || message.includes('exists') || message.includes('already')) throw error(409, 'An account already exists for this email');
-    console.error('Supabase signup failed:', authError.message);
-    throw error(400, authError.message);
+  const { data: existingData, error: lookupError } = await db.from('boards')
+    .select('id, email, password_hash, created_at, updated_at')
+    .ilike('email', email)
+    .maybeSingle();
+  if (lookupError) {
+    console.error('3tap account lookup failed:', lookupError);
+    throw error(500, 'Could not check account');
   }
-  if (!authData.user || (Array.isArray(authData.user.identities) && authData.user.identities.length === 0)) {
+
+  const existing = existingData as ExistingBoard | null;
+  if (existing) {
+    // Repair an account that an older 3tap build created before it managed to
+    // create the first session. This remains safe because the password must match.
+    const { data: sessions, error: sessionLookupError } = await db.from('board_sessions')
+      .select('board_id').eq('board_id', existing.id).limit(1);
+    if (sessionLookupError) {
+      console.error('3tap incomplete-account check failed:', sessionLookupError);
+      throw error(500, 'Could not check account');
+    }
+    if ((sessions?.length ?? 0) === 0 && existing.password_hash && verifyPassword(password, existing.password_hash)) {
+      return finishAccount(existing, email);
+    }
     throw error(409, 'An account already exists for this email');
   }
 
   const boardId = randomUUID();
-  const legacySecret = randomBytes(32).toString('base64url');
+  const deviceSecret = randomBytes(32).toString('base64url');
   const { data, error: insertError } = await db.from('boards').insert({
     id: boardId,
-    secret_hash: hashSecret(legacySecret),
-    auth_user_id: authData.user.id,
+    secret_hash: hashSecret(deviceSecret),
+    recovery_hash: null,
     email,
-    display_name: null
-  }).select('id, created_at, updated_at').single();
+    password_hash: hashPassword(password),
+    auth_user_id: null
+  }).select('id, email, password_hash, created_at, updated_at').single();
   if (insertError) {
-    await auth.auth.admin.deleteUser(authData.user.id).catch(() => undefined);
     if (insertError.code === '23505') throw error(409, 'An account already exists for this email');
-    console.error('3tap board creation failed:', insertError.message);
-    throw error(500, 'Could not create account data');
+    console.error('3tap account creation failed:', insertError);
+    throw error(500, 'Could not create account');
   }
 
-  if (!authData.session) {
-    return json({ verificationRequired: true }, { status: 202, headers: { 'cache-control': 'private, no-store' } });
+  try {
+    return await finishAccount(data as ExistingBoard, email);
+  } catch (accountError) {
+    const { error: cleanupError } = await db.from('boards').delete().eq('id', boardId);
+    if (cleanupError) console.error('3tap failed signup cleanup failed:', cleanupError);
+    throw accountError;
   }
-
-  const secret = await createSession(boardId);
-  return json({
-    credentials: { boardId, secret, email },
-    board: await getBoard(boardId, data)
-  }, { headers: { 'cache-control': 'private, no-store' } });
 }

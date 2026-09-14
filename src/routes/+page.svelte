@@ -52,15 +52,6 @@
   let view: 'today' | 'history' | 'thoughts' = 'today';
   let navMenuOpen = false;
   let panel: 'none' | 'account' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
-  let qrDataUrl = '';
-  let pairingLink = '';
-  let qrModulePromise: Promise<typeof import('qrcode')> | null = null;
-  let recoveryInput = '';
-  let restoreCodeInput = '';
-  let recoveryError = '';
-  let recovering = false;
-  let recoveryCopied = false;
-  let pairingCopied = false;
   let deletingBoard = false;
   let deleteBoardError = '';
   let archiveToast: { habit: Habit; index: number } | null = null;
@@ -793,29 +784,11 @@
     }
   }
 
-  function loadQrModule() { qrModulePromise ??= import('qrcode'); return qrModulePromise; }
-
-  async function ensureRecoveryCode() {
-    if (fixtureMode || !credentials || credentials.recoveryCode || !navigator.onLine) return;
-    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
-    const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}/recovery`, { method: 'POST', headers: authHeaders(credentials) });
-    if (!response.ok) throw new Error(await response.text());
-    const data = (await response.json()) as { recoveryCode: string };
-    credentials = { ...credentials, recoveryCode: data.recoveryCode };
-    setCredentials(credentials);
-  }
-
   function openAccess() {
     navMenuOpen = false;
     if (!credentials) return;
     deleteBoardError = '';
     panel = 'account';
-  }
-
-  async function copyPairingLink() {
-    await copyText(pairingLink);
-    pairingCopied = true;
-    setTimeout(() => (pairingCopied = false), 1400);
   }
 
   function normalizeHabits(habits: Habit[]) {
@@ -1396,6 +1369,15 @@
     hydrateEntries(recovered.board);
   }
 
+  async function responseMessage(response: Response, fallback: string) {
+    try {
+      const body = (await response.json()) as { message?: unknown };
+      return typeof body?.message === 'string' && body.message.trim() ? body.message.trim().toLowerCase() : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   async function submitAuth() {
     if (authenticating) return;
     authError = '';
@@ -1407,52 +1389,47 @@
     if (authMode === 'forgot') {
       authenticating = true;
       try {
-        await fetch('/api/auth/forgot', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) });
+        const response = await fetch('/api/auth/forgot', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        if (!response.ok) {
+          authError = await responseMessage(response, 'could not send reset email');
+          return;
+        }
         authNotice = 'if that email has an account, a reset link is on the way';
-      } catch { authError = 'could not send reset link'; }
-      finally { authenticating = false; }
+      } catch {
+        authError = 'could not reach the account service';
+      } finally {
+        authenticating = false;
+      }
       return;
     }
 
-    if (authMode === 'signup' && !validPassword(authPassword)) { authError = 'password does not meet every requirement below'; return; }
+    if (authMode === 'signup' && !validPassword(authPassword)) { authError = 'password must be 8–128 characters'; return; }
     if (authMode === 'login' && !authPassword) { authError = 'enter your password'; return; }
 
     authenticating = true;
     try {
       const response = await fetch(`/api/auth/${authMode}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(authMode === 'signup'
-          ? { email, password: authPassword }
-          : { email, password: authPassword })
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, password: authPassword })
       });
       if (!response.ok) {
-        if (response.status === 409) authError = 'an account already exists for this email';
-        else if (response.status === 401) authError = 'incorrect email or password';
-        else {
-          const rawMessage = (await response.text()).trim();
-          let message = rawMessage;
-          try {
-            const parsed = JSON.parse(rawMessage) as { message?: string };
-            if (typeof parsed.message === 'string') message = parsed.message;
-          } catch { /* plain-text error */ }
-          const lower = message.toLowerCase();
-          if (lower.includes('email not confirmed')) authError = 'verify your email before logging in';
-          else if (lower.includes('password')) authError = message.replace(/^\s*\d{3}\s+/, '') || 'check your password and try again';
-          else if (response.status === 400) authError = message.replace(/^\s*\d{3}\s+/, '') || 'check your email and password';
-          else authError = 'account service unavailable — try again';
-        }
+        const fallback = response.status === 409
+          ? 'an account already exists for this email'
+          : response.status === 401
+            ? 'incorrect email or password'
+            : response.status === 400
+              ? 'check your email and password'
+              : 'account service unavailable — try again';
+        authError = await responseMessage(response, fallback);
         return;
       }
-      const data = (await response.json()) as { credentials?: Credentials; board?: Board; verificationRequired?: boolean };
-      if (data.verificationRequired) {
-        authMode = 'login';
-        authPassword = '';
-        authNotice = 'check your email to verify your account, then log in';
-        return;
-      }
-      if (data.credentials && data.board) loadRecoveredBoard({ credentials: data.credentials, board: data.board });
+      const data = (await response.json()) as { credentials?: Credentials; board?: Board };
+      if (!data.credentials || !data.board) { authError = 'could not continue'; return; }
       authPassword = '';
+      loadRecoveredBoard({ credentials: data.credentials, board: data.board });
       await tick();
       await scrollToToday();
     } catch (error) {
@@ -1469,71 +1446,6 @@
     credentials = null; board = null; entries.clear();
     pendingByCell.clear(); localTapValues.clear(); setQueue([]);
     authMode = 'login'; authEmail = ''; authPassword = ''; authError = ''; authNotice = '';
-  }
-
-  function normalizeRecoveryEntry(raw: string) {
-    return raw
-      .trim()
-      .toLowerCase()
-      .replace(/[\s-]+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '');
-  }
-
-  async function useRecoveryCode() {
-    if (recovering) return;
-    recoveryError = '';
-    const code = normalizeRecoveryEntry(restoreCodeInput);
-    if (!code) {
-      recoveryError = 'Enter your account key.';
-      return;
-    }
-    if (!navigator.onLine) {
-      recoveryError = 'Connect to the internet to log in.';
-      return;
-    }
-
-    recovering = true;
-    try {
-      const response = await fetch('/api/recover', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ code })
-      });
-      if (response.status === 404) {
-        recoveryError = 'That account key was not found.';
-        return;
-      }
-      if (!response.ok) throw new Error(await response.text());
-
-      const recovered = (await response.json()) as { credentials: Credentials; board?: Board };
-      if (recovered.board) loadRecoveredBoard({ credentials: recovered.credentials, board: recovered.board });
-      else if (board) {
-        credentials = recovered.credentials;
-        setCredentials(recovered.credentials);
-        setCachedBoard(board);
-      }
-      qrDataUrl = '';
-      pairingLink = '';
-      panel = 'none';
-      await tick();
-      await scrollToToday();
-    } catch {
-      recoveryError = 'Could not log in. Try again.';
-    } finally {
-      recovering = false;
-    }
-  }
-
-  async function copyRecoveryCode() {
-    if (!recoveryInput) return;
-    await copyText(recoveryInput);
-    recoveryCopied = true;
-    setTimeout(() => (recoveryCopied = false), 1400);
-  }
-
-  async function copyText(text: string) {
-    await navigator.clipboard.writeText(text);
   }
 
   function confirmDeleteBoard() {
@@ -1693,7 +1605,7 @@
     <div class="navbar">
       <div class="brand-slot">
         <button class="brand-button" aria-label="Today" onclick={() => board && void switchView('today')}>3tap</button>
-        {#if loggedIn && credentials}<span class="brand-username">{credentials.email}</span>{/if}
+        {#if loggedIn && credentials}<span class="brand-account">{credentials.email}</span>{/if}
       </div>
       {#if loggedIn}
         <nav class="top-tools" aria-label="Pages">
@@ -2077,7 +1989,7 @@
       <form class="auth-card" onsubmit={(event) => { event.preventDefault(); void submitAuth(); }}>
         <div class="auth-wordmark">3tap</div>
 
-                <input aria-label="Email" placeholder="email" type="email" inputmode="email" autocomplete="email" bind:value={authEmail} oninput={() => { authError = ''; authNotice = ''; }} />
+        <input aria-label="Email" placeholder="email" type="email" inputmode="email" autocomplete="email" bind:value={authEmail} oninput={() => { authError = ''; authNotice = ''; }} />
 
         {#if authMode !== 'forgot'}
           <input aria-label="Password" placeholder="password" type="password" autocomplete={authMode === 'login' ? 'current-password' : 'new-password'} bind:value={authPassword} oninput={() => (authError = '')} />
@@ -2085,9 +1997,7 @@
 
         {#if authMode === 'signup'}
           <ul class="password-rules" aria-label="Password requirements">
-            {#each passwordChecks as [label, test]}
-              <li class:valid={test(authPassword)}>{test(authPassword) ? '✓' : '·'} {label}</li>
-            {/each}
+            <li class:valid={authPassword.length >= 8}>{authPassword.length >= 8 ? '✓' : '·'} 8+ characters</li>
             <li class:valid={authPassword.length > 0 && authPassword.length <= 128}>{authPassword.length > 0 && authPassword.length <= 128 ? '✓' : '·'} 128 characters max</li>
           </ul>
         {/if}
@@ -2364,7 +2274,7 @@
   .brand-slot {
     gap: 10px;
   }
-  .brand-username {
+  .brand-account {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
