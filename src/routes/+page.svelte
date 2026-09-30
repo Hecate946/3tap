@@ -3,25 +3,9 @@
   import { browser } from '$app/environment';
   import { flip } from 'svelte/animate';
   import { SvelteMap } from 'svelte/reactivity';
-  import type { Board, Credentials, Entry, Habit, MarkValue, Thought } from '$lib/types';
+  import type { Board, Entry, Habit, MarkValue, Thought } from '$lib/types';
   import { createDevFixture } from '$lib/dev/fixtures';
-  import {
-    authHeaders,
-    clearLocalBoard,
-    compactQueue,
-    createLocalBoardState,
-    getCachedBoard,
-    getCredentials,
-    getHabitsDirty,
-    getQueue,
-    getThoughtsDirty,
-    setCachedBoard,
-    setCredentials,
-    setHabitsDirty,
-    setQueue,
-    setThoughtsDirty,
-    type PendingEntry
-  } from '$lib/client';
+  import { loadBoard, saveBoard } from '$lib/storage';
 
   type DayColumn = { key: string; weekday: string; day: number; month: number; year: number };
   const requestedFixture = browser && import.meta.env.DEV
@@ -29,31 +13,13 @@
     : null;
   const fixtureBoard = requestedFixture ? createDevFixture(requestedFixture) : null;
   const fixtureMode = fixtureBoard !== null;
-  const CLIENT_RESET_VERSION = '2026-08-23-clean-slate-v1';
-  if (browser && !fixtureMode && localStorage.getItem('3tap.client-reset') !== CLIENT_RESET_VERSION) {
-    clearLocalBoard();
-    localStorage.setItem('3tap.client-reset', CLIENT_RESET_VERSION);
-  }
 
-  let credentials: Credentials | null = fixtureMode ? null : (browser ? getCredentials() : null);
-  let board: Board | null = fixtureBoard ?? (browser ? getCachedBoard() : null);
-  if (browser && !fixtureMode && !credentials && board) {
-    clearLocalBoard();
-    board = null;
-  }
-  let online = true;
-  let authMode: 'login' | 'signup' | 'forgot' = 'login';
-  let authEmail = '';
-  let authPassword = '';
-  let authError = '';
-  let authNotice = '';
-  let authenticating = false;
+  let board: Board | null = fixtureBoard;
+  let ready = fixtureMode;
   let theme: 'light' | 'dark' = 'light';
-  let view: 'today' | 'history' | 'thoughts' = 'today';
+  let view: 'habits' | 'thoughts' = 'habits';
   let navMenuOpen = false;
-  let panel: 'none' | 'account' | 'archived' | 'delete' | 'clear' | 'delete-board' = 'none';
-  let deletingBoard = false;
-  let deleteBoardError = '';
+  let panel: 'none' | 'archived' | 'delete' | 'clear' = 'none';
   let archiveToast: { habit: Habit; index: number } | null = null;
   let archiveToastTimer: ReturnType<typeof setTimeout> | undefined;
   let deleteHabitTarget: Habit | null = null;
@@ -72,8 +38,6 @@
   let newThoughtText = '';
   let editThoughtInput: HTMLInputElement;
   let newThoughtInput: HTMLInputElement;
-  let pendingHabitSave: Habit[] | null = !fixtureMode && browser && board && getHabitsDirty() ? board.habits : null;
-  let pendingThoughtSave: Thought[] | null = !fixtureMode && browser && board && getThoughtsDirty() ? (board.thoughts ?? []) : null;
   let scroller: HTMLDivElement;
   let currentDay = new Date();
   let windowEndOffset = 0;
@@ -94,21 +58,9 @@
     ? Math.max(1, Math.ceil((window.innerWidth - HABIT_WIDTH) / DAY_SIZE) + 1)
     : 32;
   let windowStartOffset = -(Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT) - 1);
-  const pendingByCell = new Map<string, PendingEntry>();
-  const localTapValues = new Map<string, PendingEntry>();
-  let syncTimer: ReturnType<typeof setTimeout> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
-  let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
-  let persistIdle: number | undefined;
-  let queuePersistTimer: ReturnType<typeof setTimeout> | undefined;
-  let habitFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  let thoughtFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  let flushPromise: Promise<void> | null = null;
-  let syncPromise: Promise<void> | null = null;
-  let registrationPromise: Promise<boolean> | null = null;
-  let habitFlushPromise: Promise<void> | null = null;
-  let thoughtFlushPromise: Promise<void> | null = null;
+  let persistPromise = Promise.resolve();
   let draggingItemId: string | null = null;
   let dragPointerId: number | null = null;
   let dragCandidate: { itemId: string; kind: 'habit' | 'thought'; startX: number; startY: number; offsetY: number } | null = null;
@@ -143,15 +95,6 @@
     if (entry.value !== 0) entries.set(cellKey(entry.habitId, entry.date), entry);
   }
   if (board) board.entries = [];
-  if (credentials) {
-    for (const change of compactQueue(getQueue())) {
-      const key = cellKey(change.habitId, change.date);
-      pendingByCell.set(key, change);
-      localTapValues.set(key, change);
-      if (change.value === 0) entries.delete(key);
-      else entries.set(key, { habitId: change.habitId, date: change.date, value: change.value as 1 | 2 });
-    }
-  }
 
   function dateKey(date: Date) {
     const y = date.getFullYear();
@@ -228,7 +171,6 @@
   $: todayKey = dateKey(currentDay);
   $: yesterdayKey = dateKey(shiftedDate(currentDay, -1));
   $: enrolledKey = enrollmentKey(board);
-  $: loggedIn = Boolean(board && credentials?.email);
 
   function isPreEnrollment(date: string) {
     return Boolean(enrolledKey && date < enrolledKey);
@@ -253,113 +195,66 @@
     return Boolean(start && date < start);
   }
 
-  function reconcileFullEntries(source: Entry[]) {
-    const next = new Map<string, Entry>();
-    for (const entry of source) if (entry.value !== 0) next.set(cellKey(entry.habitId, entry.date), entry);
-    for (const key of entries.keys()) if (!next.has(key)) entries.delete(key);
-    for (const [key, entry] of next) if (entries.get(key)?.value !== entry.value) entries.set(key, entry);
-  }
-
-  function reconcileEntryDelta(source: Entry[], validHabitIds: Set<string>) {
-    for (const [key, entry] of entries) if (!validHabitIds.has(entry.habitId)) entries.delete(key);
-    for (const entry of source) {
-      const key = cellKey(entry.habitId, entry.date);
-      if (entry.value === 0) entries.delete(key);
-      else if (entries.get(key)?.value !== entry.value) entries.set(key, entry);
-    }
-  }
-
   function hydrateEntries(source: Board | null) {
-    reconcileFullEntries(source?.entries ?? []);
+    entries.clear();
+    for (const entry of source?.entries ?? []) {
+      if (entry.value !== 0) entries.set(cellKey(entry.habitId, entry.date), entry);
+    }
   }
 
   function valueFor(habitId: string, date: string): MarkValue {
-    const key = cellKey(habitId, date);
-    return (localTapValues.get(key)?.value ?? entries.get(key)?.value ?? 0) as MarkValue;
+    return (entries.get(cellKey(habitId, date))?.value ?? 0) as MarkValue;
   }
 
-  function pendingChanges() {
-    return [...pendingByCell.values()];
+  function snapshotBoard(): Board | null {
+    if (!board) return null;
+    return {
+      ...board,
+      updatedAt: new Date().toISOString(),
+      entries: [...entries.values()]
+    };
   }
 
   function persistLocalStateNow() {
-    if (fixtureMode) return;
-    if (board) {
-      const logicalEntries = new Map(entries);
-      const localChanges = new Map<string, PendingEntry>();
-      for (const change of localTapValues.values()) localChanges.set(cellKey(change.habitId, change.date), change);
-      for (const change of pendingChanges()) localChanges.set(cellKey(change.habitId, change.date), change);
-      for (const change of localChanges.values()) {
-        const key = cellKey(change.habitId, change.date);
-        if (change.value === 0) logicalEntries.delete(key);
-        else {
-          logicalEntries.set(key, {
-            habitId: change.habitId,
-            date: change.date,
-            value: change.value as 1 | 2
-          });
-        }
-      }
-      setCachedBoard({ ...board, entries: [...logicalEntries.values()] });
-    }
-    setQueue(pendingChanges());
+    if (fixtureMode) return persistPromise;
+    const snapshot = snapshotBoard();
+    if (!snapshot) return persistPromise;
+    persistPromise = persistPromise
+      .catch(() => undefined)
+      .then(() => saveBoard(snapshot))
+      .catch((error) => console.error('3tap could not save local data', error));
+    return persistPromise;
   }
 
   function cancelScheduledPersistence() {
     if (persistTimer) clearTimeout(persistTimer);
     persistTimer = undefined;
-    if (persistIdle !== undefined && browser) {
-      (window as any).cancelIdleCallback?.(persistIdle);
-      persistIdle = undefined;
-    }
   }
 
   function schedulePersistence() {
-    if (fixtureMode || persistTimer || persistIdle !== undefined) return;
-    const commit = () => {
+    if (fixtureMode) return;
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
       persistTimer = undefined;
-      persistIdle = undefined;
-      persistLocalStateNow();
-    };
-    const requestIdle = browser ? (window as any).requestIdleCallback : undefined;
-    if (requestIdle) persistIdle = requestIdle(commit, { timeout: 700 });
-    else persistTimer = setTimeout(commit, 300);
-  }
-
-  function scheduleQueuePersistence() {
-    if (fixtureMode) return;
-    if (queuePersistTimer) clearTimeout(queuePersistTimer);
-    queuePersistTimer = setTimeout(() => {
-      queuePersistTimer = undefined;
-      setQueue(pendingChanges());
-    }, 50);
-  }
-
-  function queueChange(change: PendingEntry) {
-    if (fixtureMode) return;
-    pendingByCell.set(cellKey(change.habitId, change.date), change);
-    scheduleQueuePersistence();
-
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = setTimeout(() => {
-      flushTimer = undefined;
-      void flushQueue();
-    }, 120);
+      void persistLocalStateNow();
+    }, 40);
   }
 
   function tapCell(habitId: string, date: string, button?: HTMLButtonElement) {
     if (!isEditableDate(date)) return;
     const current = valueFor(habitId, date);
     const next = ((current + 1) % 3) as MarkValue;
-    const change = { habitId, date, value: next };
+    const key = cellKey(habitId, date);
+    if (next === 0) entries.delete(key);
+    else entries.set(key, { habitId, date, value: next as 1 | 2 });
+
     if (button) {
       button.textContent = symbols[next];
       button.classList.toggle('plus', next === 2);
       button.setAttribute('aria-label', `${date}: ${symbols[next]}`);
     }
 
-    localTapValues.set(cellKey(habitId, date), change);
-    queueChange(change);
+    schedulePersistence();
   }
 
   function startCellPress(event: PointerEvent, habitId: string, date: string) {
@@ -390,176 +285,6 @@
     cellPresses.delete(event.pointerId);
   }
 
-  function resetToFreshLocalBoard() {
-    if (fixtureMode) return;
-    clearLocalBoard();
-    pendingByCell.clear();
-    localTapValues.clear();
-    pendingHabitSave = null;
-    pendingThoughtSave = null;
-    setHabitsDirty(false);
-    setThoughtsDirty(false);
-    entries.clear();
-    habitStartKeys.clear();
-    const fresh = createLocalBoardState();
-    credentials = fresh.credentials;
-    board = fresh.board;
-    setCredentials(credentials);
-    setCachedBoard(board);
-  }
-
-  async function ensureBoardRegistered() {
-    if (fixtureMode || !credentials) return false;
-    if (!credentials.pendingCreate) return true;
-    if (!navigator.onLine) return false;
-    if (registrationPromise) return registrationPromise;
-
-    registrationPromise = (async () => {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        if (!credentials || !board) return false;
-        const response = await fetch('/api/boards', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ boardId: credentials.boardId, secret: credentials.secret, createdAt: board.createdAt })
-        });
-        if (response.status === 409) {
-          const fresh = createLocalBoardState();
-          credentials = fresh.credentials;
-          setCredentials(credentials);
-          continue;
-        }
-        if (!response.ok) throw new Error(await response.text());
-        const data = (await response.json()) as { credentials: Credentials; board: Board };
-        credentials = { ...data.credentials, pendingCreate: false };
-        board = { ...board, createdAt: data.board.createdAt || board.createdAt, updatedAt: data.board.updatedAt };
-        setCredentials(credentials);
-        schedulePersistence();
-        online = true;
-        return true;
-      }
-      return false;
-    })().catch(() => { online = navigator.onLine; return false; }).finally(() => { registrationPromise = null; });
-    return registrationPromise;
-  }
-
-  function sameHabitSnapshot(a: Habit[], b: Habit[]) {
-    return a.length === b.length && a.every((habit, index) => {
-      const other = b[index];
-      return habit.id === other?.id && habit.name === other.name && habit.position === other.position
-        && habit.createdAt === other.createdAt && habit.archivedAt === other.archivedAt;
-    });
-  }
-
-  function sameThoughtSnapshot(a: Thought[], b: Thought[]) {
-    return a.length === b.length && a.every((thought, index) => {
-      const other = b[index];
-      return thought.id === other?.id && thought.text === other.text && thought.position === other.position
-        && thought.createdAt === other.createdAt;
-    });
-  }
-
-  async function fetchBoard() {
-    if (fixtureMode || !credentials) return;
-    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
-    const headers: Record<string, string> = authHeaders(credentials);
-    if (board?.updatedAt) headers['if-none-match'] = `"${board.updatedAt}"`;
-    const since = board?.updatedAt ? `?since=${encodeURIComponent(board.updatedAt)}` : '';
-    const response = await fetch(`/api/boards/${credentials.boardId}${since}`, { headers });
-    if (response.status === 304) return;
-    if (!response.ok) {
-      if (response.status === 404) {
-        logOut();
-        return;
-      }
-      if (response.status === 401) return;
-      throw new Error(await response.text());
-    }
-    const remoteBoard = (await response.json()) as Board;
-    const activeHabits = pendingHabitSave ?? remoteBoard.habits;
-    const archivedHabits = pendingHabitSave ? (board?.archivedHabits ?? remoteBoard.archivedHabits ?? []) : (remoteBoard.archivedHabits ?? []);
-    const thoughts = pendingThoughtSave ? (board?.thoughts ?? []) : (remoteBoard.thoughts ?? []);
-    if (remoteBoard.entriesDelta) {
-      const validHabitIds = new Set([...remoteBoard.habits.map(h => h.id), ...archivedHabits.map(h => h.id), ...activeHabits.map(h => h.id)]);
-      reconcileEntryDelta(remoteBoard.entries, validHabitIds);
-    } else reconcileFullEntries(remoteBoard.entries);
-    const changed = !board || !sameHabitSnapshot(board.habits, activeHabits) || !sameHabitSnapshot(board.archivedHabits ?? [], archivedHabits) || !sameThoughtSnapshot(board.thoughts ?? [], thoughts) || board.createdAt !== remoteBoard.createdAt;
-    if (changed || !board) {
-      habitStartKeys.clear();
-      board = { createdAt: remoteBoard.createdAt, updatedAt: remoteBoard.updatedAt, habits: activeHabits, archivedHabits, thoughts, entries: [] };
-    } else board.updatedAt = remoteBoard.updatedAt;
-    for (const [key] of localTapValues) if (!pendingByCell.has(key)) localTapValues.delete(key);
-    schedulePersistence();
-  }
-
-  async function flushQueue(options: { keepalive?: boolean } = {}) {
-    if (fixtureMode) return;
-    if (flushPromise) return flushPromise;
-    if (pendingHabitSave || habitFlushPromise) {
-      await flushHabitChanges();
-      if (pendingHabitSave) return;
-    }
-    if (!credentials || !navigator.onLine || pendingByCell.size === 0) return;
-    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
-
-    flushPromise = (async () => {
-      const sent = new Map(pendingByCell);
-      try {
-        const response = await fetch(`/api/boards/${credentials!.boardId}/entries`, {
-          method: 'PUT',
-          headers: authHeaders(credentials!),
-          body: JSON.stringify({ changes: [...sent.values()] }),
-          keepalive: options.keepalive ?? false
-        });
-        if (!response.ok) throw new Error(await response.text());
-
-        for (const [key, change] of sent) {
-          if (pendingByCell.get(key) === change) pendingByCell.delete(key);
-        }
-        schedulePersistence();
-        online = true;
-      } catch {
-        online = navigator.onLine;
-      } finally {
-        flushPromise = null;
-        if (pendingByCell.size && navigator.onLine) {
-          if (flushTimer) clearTimeout(flushTimer);
-          flushTimer = setTimeout(() => {
-            flushTimer = undefined;
-            void flushQueue();
-          }, 40);
-        }
-      }
-    })();
-
-    return flushPromise;
-  }
-
-  async function sync() {
-    if (fixtureMode) return;
-    if (syncPromise) return syncPromise;
-    if (dragActive) return;
-    if (!credentials || !navigator.onLine || document.visibilityState === 'hidden') {
-      online = navigator.onLine;
-      return;
-    }
-
-    syncPromise = (async () => {
-      try {
-        if (!(await ensureBoardRegistered())) return;
-        await flushHabitChanges();
-        await flushThoughtChanges();
-        await flushQueue();
-        await fetchBoard();
-        online = true;
-      } catch {
-        online = navigator.onLine;
-      } finally {
-        syncPromise = null;
-      }
-    })();
-
-    return syncPromise;
-  }
 
   function timelineMetrics() { return { dayWidth: DAY_SIZE, habitWidth: HABIT_WIDTH }; }
 
@@ -744,14 +469,15 @@
     timelineTouchAxis = '';
   }
 
-  async function switchView(next: 'today' | 'history' | 'thoughts') {
+  async function switchView(next: 'habits' | 'thoughts') {
     if (next === view) return;
-    if (view === 'history' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
+    if (view === 'habits' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
     view = next;
     await tick();
-    if (next === 'history' && scroller) {
+    if (next === 'habits' && scroller) {
       scroller.scrollLeft = savedHabitScrollLeft;
-      updateTimelineStatus();
+      if (savedHabitScrollLeft === 0) await scrollToToday();
+      else updateTimelineStatus();
     } else if (scroller) {
       scroller.scrollLeft = 0;
     }
@@ -784,70 +510,14 @@
     }
   }
 
-  function openAccess() {
-    navMenuOpen = false;
-    if (!credentials) return;
-    deleteBoardError = '';
-    panel = 'account';
-  }
-
   function normalizeHabits(habits: Habit[]) {
     return habits.map((habit, position) => ({ ...habit, position }));
   }
 
   function setLocalHabits(habits: Habit[]) {
     if (!board) return;
-    const next = normalizeHabits(habits);
-    board = { ...board, habits: next };
-    if (fixtureMode) return;
-    pendingHabitSave = next;
-    setHabitsDirty(true);
+    board = { ...board, habits: normalizeHabits(habits) };
     schedulePersistence();
-
-    if (habitFlushTimer) clearTimeout(habitFlushTimer);
-    habitFlushTimer = setTimeout(() => {
-      habitFlushTimer = undefined;
-      void flushHabitChanges();
-    }, 80);
-  }
-
-  async function flushHabitChanges() {
-    if (fixtureMode) return;
-    if (habitFlushPromise) return habitFlushPromise;
-    if (!credentials || !navigator.onLine || !pendingHabitSave) return;
-    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
-
-    const sent = pendingHabitSave;
-    habitFlushPromise = (async () => {
-      try {
-        const response = await fetch(`/api/boards/${credentials!.boardId}/habits`, {
-          method: 'PUT',
-          headers: authHeaders(credentials!),
-          body: JSON.stringify({ habits: sent.map(({ id, name }) => ({ id, name })) })
-        });
-        if (!response.ok) throw new Error(await response.text());
-        if (pendingHabitSave === sent) {
-          pendingHabitSave = null;
-          setHabitsDirty(false);
-          schedulePersistence();
-        }
-        online = true;
-      } catch {
-        online = navigator.onLine;
-      } finally {
-        habitFlushPromise = null;
-        if (pendingHabitSave && navigator.onLine) {
-          if (habitFlushTimer) clearTimeout(habitFlushTimer);
-      if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
-          habitFlushTimer = setTimeout(() => {
-            habitFlushTimer = undefined;
-            void flushHabitChanges();
-          }, 120);
-        }
-      }
-    })();
-
-    return habitFlushPromise;
   }
 
   function normalizeThoughts(thoughts: Thought[]) {
@@ -856,56 +526,8 @@
 
   function setLocalThoughts(thoughts: Thought[]) {
     if (!board) return;
-    const next = normalizeThoughts(thoughts);
-    board = { ...board, thoughts: next };
-    if (fixtureMode) return;
-    pendingThoughtSave = next;
-    setThoughtsDirty(true);
+    board = { ...board, thoughts: normalizeThoughts(thoughts) };
     schedulePersistence();
-
-    if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
-    thoughtFlushTimer = setTimeout(() => {
-      thoughtFlushTimer = undefined;
-      void flushThoughtChanges();
-    }, 80);
-  }
-
-  async function flushThoughtChanges() {
-    if (fixtureMode) return;
-    if (thoughtFlushPromise) return thoughtFlushPromise;
-    if (!credentials || !navigator.onLine || !pendingThoughtSave) return;
-    if (credentials.pendingCreate && !(await ensureBoardRegistered())) return;
-
-    const sent = pendingThoughtSave;
-    thoughtFlushPromise = (async () => {
-      try {
-        const response = await fetch(`/api/boards/${credentials!.boardId}/thoughts`, {
-          method: 'PUT',
-          headers: authHeaders(credentials!),
-          body: JSON.stringify({ thoughts: sent.map(({ id, text }) => ({ id, text })) })
-        });
-        if (!response.ok) throw new Error(await response.text());
-        if (pendingThoughtSave === sent) {
-          pendingThoughtSave = null;
-          setThoughtsDirty(false);
-          schedulePersistence();
-        }
-        online = true;
-      } catch {
-        online = navigator.onLine;
-      } finally {
-        thoughtFlushPromise = null;
-        if (pendingThoughtSave && navigator.onLine) {
-          if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
-          thoughtFlushTimer = setTimeout(() => {
-            thoughtFlushTimer = undefined;
-            void flushThoughtChanges();
-          }, 120);
-        }
-      }
-    })();
-
-    return thoughtFlushPromise;
   }
 
   async function beginEditThought(thought: Thought) {
@@ -1256,65 +878,48 @@
     return Math.max(1, calendarDayDistance(startDay, endDay) + 1);
   }
 
-  async function apiErrorMessage(response: Response, fallback: string) {
-    const detail = (await response.text()).trim();
-    if (!detail) return fallback;
-    try {
-      const parsed = JSON.parse(detail) as { message?: unknown };
-      if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message.trim();
-    } catch {
-    }
-    return detail;
-  }
 
   async function deleteHabitForever() {
-    if (!credentials || !board || !deleteHabitTarget || deletingHabit) return;
+    if (!board || !deleteHabitTarget || deletingHabit) return;
     const target = deleteHabitTarget;
     deletingHabit = true;
     archiveError = '';
 
     try {
-      if (credentials.pendingCreate && !(await ensureBoardRegistered())) throw new Error('Connect to the internet to delete this habit.');
-      await flushHabitChanges();
-      if (pendingHabitSave) throw new Error('Could not sync changes yet. Try again.');
-      const response = await fetch(`/api/boards/${credentials.boardId}/habits/${target.id}`, {
-        method: 'DELETE',
-        headers: authHeaders(credentials)
-      });
-      if (!response.ok && response.status !== 404) {
-        throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
-      }
-
       for (const [key, entry] of entries) if (entry.habitId === target.id) entries.delete(key);
-      board = { ...board, archivedHabits: (board.archivedHabits ?? []).filter((habit) => habit.id !== target.id), entries: [] };
+      board = {
+        ...board,
+        archivedHabits: (board.archivedHabits ?? []).filter((habit) => habit.id !== target.id),
+        entries: []
+      };
       deleteHabitTarget = null;
-      schedulePersistence();
+      await persistLocalStateNow();
       panel = 'archived';
-      void fetchBoard().catch(() => {});
-    } catch (error) {
-      archiveError = error instanceof Error ? error.message : 'could not delete; retry';
+    } catch {
+      archiveError = 'could not delete local data';
     } finally {
       deletingHabit = false;
     }
   }
 
   async function clearArchive() {
-    if (!credentials || !board || clearingArchive) return;
+    if (!board || clearingArchive) return;
     const archived = [...(board.archivedHabits ?? [])];
     if (!archived.length) { panel = 'archived'; return; }
-    clearingArchive = true; archiveError = '';
+    clearingArchive = true;
+    archiveError = '';
+
     try {
-      if (credentials.pendingCreate && !(await ensureBoardRegistered())) throw new Error('Connect to the internet to clear the archive.');
-      await flushHabitChanges();
-      if (pendingHabitSave) throw new Error('Could not sync changes yet. Try again.');
-      const response = await fetch(`/api/boards/${credentials.boardId}/habits`, { method: 'DELETE', headers: authHeaders(credentials) });
-      if (!response.ok) throw new Error(await apiErrorMessage(response, `Delete failed (${response.status})`));
-      const archivedIds = new Set(archived.map(h => h.id));
+      const archivedIds = new Set(archived.map((habit) => habit.id));
       for (const [key, entry] of entries) if (archivedIds.has(entry.habitId)) entries.delete(key);
       board = { ...board, archivedHabits: [], entries: [] };
-      schedulePersistence(); panel = 'archived'; void fetchBoard().catch(() => {});
-    } catch (error) { archiveError = error instanceof Error ? error.message : 'could not clear archive; retry'; }
-    finally { clearingArchive = false; }
+      await persistLocalStateNow();
+      panel = 'archived';
+    } catch {
+      archiveError = 'could not clear local data';
+    } finally {
+      clearingArchive = false;
+    }
   }
 
   async function beginAddHabit() {
@@ -1341,129 +946,38 @@
     newHabitName = '';
   }
 
-  function normalizeEmailInput(raw: string) {
-    return raw.trim().toLowerCase().slice(0, 254);
+  function emptyBoard(): Board {
+    return {
+      createdAt: new Date().toISOString(),
+      habits: [],
+      archivedHabits: [],
+      thoughts: [],
+      entries: []
+    };
   }
 
-  const passwordChecks = [
-    ['8+ characters', (value: string) => value.length >= 8]
-  ] as const;
-
-  function validPassword(value: string) {
-    return value.length <= 128 && passwordChecks.every(([, test]) => test(value));
-  }
-
-  function loadRecoveredBoard(recovered: { credentials: Credentials; board: Board }) {
-    credentials = recovered.credentials;
-    board = recovered.board;
-    setCredentials(recovered.credentials);
-    setCachedBoard(recovered.board);
-    setQueue([]);
-    pendingByCell.clear();
-    localTapValues.clear();
-    pendingHabitSave = null;
-    pendingThoughtSave = null;
-    setHabitsDirty(false);
-    setThoughtsDirty(false);
-    entries.clear();
-    hydrateEntries(recovered.board);
-  }
-
-  async function responseMessage(response: Response, fallback: string) {
-    try {
-      const body = (await response.json()) as { message?: unknown };
-      return typeof body?.message === 'string' && body.message.trim() ? body.message.trim().toLowerCase() : fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
-  async function submitAuth() {
-    if (authenticating) return;
-    authError = '';
-    authNotice = '';
-    const email = normalizeEmailInput(authEmail);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { authError = 'enter a valid email'; return; }
-    if (!navigator.onLine) { authError = 'connect to the internet to continue'; return; }
-
-    if (authMode === 'forgot') {
-      authenticating = true;
-      try {
-        const response = await fetch('/api/auth/forgot', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ email })
-        });
-        if (!response.ok) {
-          authError = await responseMessage(response, 'could not send reset email');
-          return;
-        }
-        authNotice = 'if that email has an account, a reset link is on the way';
-      } catch {
-        authError = 'could not reach the account service';
-      } finally {
-        authenticating = false;
-      }
+  async function initialize() {
+    if (fixtureMode) {
+      ready = true;
+      if (board) await scrollToToday();
       return;
     }
 
-    if (authMode === 'signup' && !validPassword(authPassword)) { authError = 'password must be 8–128 characters'; return; }
-    if (authMode === 'login' && !authPassword) { authError = 'enter your password'; return; }
-
-    authenticating = true;
     try {
-      const response = await fetch(`/api/auth/${authMode}`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email, password: authPassword })
-      });
-      if (!response.ok) {
-        const fallback = response.status === 409
-          ? 'an account already exists for this email'
-          : response.status === 401
-            ? 'incorrect email or password'
-            : response.status === 400
-              ? 'check your email and password'
-              : 'account service unavailable — try again';
-        authError = await responseMessage(response, fallback);
-        return;
-      }
-      const data = (await response.json()) as { credentials?: Credentials; board?: Board };
-      if (!data.credentials || !data.board) { authError = 'could not continue'; return; }
-      authPassword = '';
-      loadRecoveredBoard({ credentials: data.credentials, board: data.board });
-      await tick();
-      await scrollToToday();
+      const stored = await loadBoard();
+      const loaded = stored ?? emptyBoard();
+      hydrateEntries(loaded);
+      board = { ...loaded, entries: [] };
+      habitStartKeys.clear();
+      if (!stored) await saveBoard(loaded);
     } catch (error) {
-      console.error('3tap auth request failed', error);
-      authError = 'could not reach the account service';
+      console.error('3tap could not load local data', error);
+      board = emptyBoard();
     } finally {
-      authenticating = false;
+      ready = true;
+      await tick();
+      if (board) await scrollToToday();
     }
-  }
-
-  function logOut() {
-    navMenuOpen = false; panel = 'none';
-    clearLocalBoard();
-    credentials = null; board = null; entries.clear();
-    pendingByCell.clear(); localTapValues.clear(); setQueue([]);
-    authMode = 'login'; authEmail = ''; authPassword = ''; authError = ''; authNotice = '';
-  }
-
-  function confirmDeleteBoard() {
-    deleteBoardError = '';
-    panel = 'delete-board';
-  }
-
-  async function deleteBoardForever() {
-    if (!credentials || deletingBoard) return;
-    deletingBoard = true; deleteBoardError = '';
-    try {
-      if (!credentials.pendingCreate) {
-        const response = await fetch(`/api/boards/${encodeURIComponent(credentials.boardId)}`, { method: 'DELETE', headers: authHeaders(credentials) });
-        if (!response.ok && response.status !== 404) throw new Error(await apiErrorMessage(response, 'Could not delete this board.'));
-      }
-      deletingBoard = false;
-      logOut();
-    } catch (error) { deleteBoardError = error instanceof Error && error.message ? error.message : 'Could not delete this board. Try again.'; deletingBoard = false; }
   }
 
   function scheduleNextDay() {
@@ -1492,33 +1006,9 @@
     applyTheme(theme === 'dark' ? 'light' : 'dark');
   }
 
-  function scheduleSyncLoop() {
-    if (syncTimer) clearTimeout(syncTimer);
-    syncTimer = undefined;
-    if (fixtureMode || document.visibilityState !== 'visible') return;
-    syncTimer = setTimeout(async () => { await sync(); scheduleSyncLoop(); }, 8000);
-  }
-
-  async function initialize() {
-    if (fixtureMode) {
-      online = true;
-      if (board) await scrollToToday();
-      return;
-    }
-    online = navigator.onLine;
-    if (!credentials) { board = null; return; }
-    if (!board && navigator.onLine) { try { await fetchBoard(); } catch { online = navigator.onLine; } }
-    if (board) await scrollToToday();
-    void sync();
-  }
-
   onMount(() => {
     theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
-    void initialize();
-    const onFocus = () => void sync();
-    const onOnline = () => credentials ? void sync() : void initialize();
-    const onOffline = () => (online = false);
-    const onVisibility = () => { if (document.visibilityState === 'visible') void sync(); scheduleSyncLoop(); };
+
     const onDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (navMenuOpen && !target?.closest('.nav-actions')) navMenuOpen = false;
@@ -1545,26 +1035,24 @@
     };
     const onPageHide = () => {
       cancelScheduledPersistence();
-      persistLocalStateNow();
-      void flushHabitChanges();
-      void flushThoughtChanges();
-      void flushQueue({ keepalive: true });
+      void persistLocalStateNow();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') onPageHide();
     };
 
-    scroller?.addEventListener('touchstart', startTimelineTouch, { passive: true });
-    scroller?.addEventListener('touchmove', moveTimelineTouch, { passive: false });
-    scroller?.addEventListener('touchend', endTimelineTouch, { passive: true });
-    scroller?.addEventListener('touchcancel', endTimelineTouch, { passive: true });
+    void initialize().then(() => {
+      scroller?.addEventListener('touchstart', startTimelineTouch, { passive: true });
+      scroller?.addEventListener('touchmove', moveTimelineTouch, { passive: false });
+      scroller?.addEventListener('touchend', endTimelineTouch, { passive: true });
+      scroller?.addEventListener('touchcancel', endTimelineTouch, { passive: true });
+    });
 
-    window.addEventListener('focus', onFocus);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
     document.addEventListener('pointerdown', onDocumentPointerDown);
 
-    scheduleSyncLoop();
     scheduleNextDay();
 
     return () => {
@@ -1572,20 +1060,12 @@
       scroller?.removeEventListener('touchmove', moveTimelineTouch);
       scroller?.removeEventListener('touchend', endTimelineTouch);
       scroller?.removeEventListener('touchcancel', endTimelineTouch);
-      window.removeEventListener('focus', onFocus);
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', onResize);
       document.removeEventListener('pointerdown', onDocumentPointerDown);
-      if (syncTimer) clearTimeout(syncTimer);
       if (dayTimer) clearTimeout(dayTimer);
-      if (flushTimer) clearTimeout(flushTimer);
       cancelScheduledPersistence();
-      if (queuePersistTimer) clearTimeout(queuePersistTimer);
-      if (habitFlushTimer) clearTimeout(habitFlushTimer);
-      if (thoughtFlushTimer) clearTimeout(thoughtFlushTimer);
       if (archiveToastTimer) clearTimeout(archiveToastTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       cleanupItemDrag(false);
@@ -1600,59 +1080,41 @@
 </svelte:head>
 
 <div class="shell">
-  {#if loggedIn}
   <header class="nav-shell">
     <div class="navbar">
       <div class="brand-slot">
-        <button class="brand-button" aria-label="Today" onclick={() => board && void switchView('today')}>3tap</button>
-        {#if loggedIn && credentials}<span class="brand-account">{credentials.email}</span>{/if}
+        <button class="brand-button" aria-label="Habits" onclick={() => void switchView('habits')}>3tap</button>
       </div>
-      {#if loggedIn}
-        <nav class="top-tools" aria-label="Pages">
-          <button class="tool-icon habits-tool" class:active={view === 'today'} aria-label="Today" aria-pressed={view === 'today'} title="Today" onclick={() => void switchView('today')}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6"></rect><rect x="14" y="4" width="6" height="6"></rect><rect x="4" y="14" width="6" height="6"></rect><rect x="14" y="14" width="6" height="6"></rect></svg>
-          </button>
-          <button class="tool-icon thoughts-tool" class:active={view === 'thoughts'} aria-label="Thoughts" aria-pressed={view === 'thoughts'} title="Thoughts" onclick={() => void switchView('thoughts')}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
-          </button>
-          <button class="tool-icon history-tool" class:active={view === 'history'} aria-label="History" aria-pressed={view === 'history'} title="History" onclick={() => void switchView('history')}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path><path d="M8 4v16M14 4v16"></path></svg>
-          </button>
-        </nav>
-        <div class="nav-actions">
-          <button class="nav-more" aria-label="Menu" aria-haspopup="menu" aria-expanded={navMenuOpen} onclick={() => (navMenuOpen = !navMenuOpen)}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"></path></svg>
-          </button>
-          {#if navMenuOpen}
-            <div class="nav-menu icon-menu" role="menu" aria-label="Menu">
-              <button class="menu-icon-button theme-tool" role="menuitem" aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} title={theme === 'dark' ? 'Light theme' : 'Dark theme'} onclick={() => { toggleTheme(); navMenuOpen = false; }}>
-                {#if theme === 'dark'}
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" class="icon-fill"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>
-                {:else}
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path></svg>
-                {/if}
-              </button>
-              <button class="menu-icon-button archive-menu-button" role="menuitem" aria-label="Archive" title="Archive" onclick={openArchived}>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14v13H5zM4 4h16v4H4zM9 11h6"></path></svg>
-              </button>
-              <button class="menu-icon-button logout-menu-button" role="menuitem" aria-label="Log out" title="Log out" onclick={logOut}>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M13 8l4 4-4 4M8 12h9"></path></svg>
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/if}
+      <div class="nav-actions">
+        <button
+          class="nav-more"
+          aria-label="More"
+          aria-haspopup="menu"
+          aria-expanded={navMenuOpen}
+          onclick={() => (navMenuOpen = !navMenuOpen)}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="6" cy="12" r="1.35"></circle>
+            <circle cx="12" cy="12" r="1.35"></circle>
+            <circle cx="18" cy="12" r="1.35"></circle>
+          </svg>
+        </button>
+        {#if navMenuOpen}
+          <div class="nav-menu" role="menu" aria-label="More">
+            <button role="menuitem" onclick={openArchived}>archive</button>
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
-  {/if}
 
-  {#if loggedIn}
+  {#if ready && board}
     <main>
       <div
         class="grid-scroll"
-        class:thoughts-mode={view !== 'history'}
+        class:thoughts-mode={view === 'thoughts'}
         role="region"
-        aria-label={view === 'history' ? 'Habit history' : view === 'thoughts' ? 'Thoughts' : 'Today'}
+        aria-label={view === 'habits' ? 'Habit timeline' : 'Thoughts'}
         bind:this={scroller}
         onscroll={onTimelineScroll}
         onpointerdown={startTimelinePan}
@@ -1663,16 +1125,61 @@
         <div class="grid-frame">
           <div class="timeline-header" aria-label="Timeline">
             <div class="timeline-side">
-              <div class="timeline-side-spacer" aria-hidden="true"></div>
+              <nav class="timeline-controls" aria-label="Pages">
+                <button
+                  class="tool-icon habits-tool"
+                  class:active={view === 'habits'}
+                  aria-label="Habits"
+                  aria-pressed={view === 'habits'}
+                  title="Habits"
+                  onclick={() => void switchView('habits')}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="4" y="4" width="6" height="6"></rect>
+                    <rect x="14" y="4" width="6" height="6"></rect>
+                    <rect x="4" y="14" width="6" height="6"></rect>
+                    <rect x="14" y="14" width="6" height="6"></rect>
+                  </svg>
+                </button>
+                <button
+                  class="tool-icon thoughts-tool"
+                  class:active={view === 'thoughts'}
+                  aria-label="Thoughts"
+                  aria-pressed={view === 'thoughts'}
+                  title="Thoughts"
+                  onclick={() => void switchView('thoughts')}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
+                </button>
+                <button
+                  class="tool-icon theme-tool"
+                  aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                  title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+                  onclick={toggleTheme}
+                >
+                  {#if theme === 'dark'}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
+                      <path d="M12 2v2"></path><path d="M12 20v2"></path>
+                      <path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path>
+                      <path d="M2 12h2"></path><path d="M20 12h2"></path>
+                      <path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path>
+                    </svg>
+                  {:else}
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path>
+                    </svg>
+                  {/if}
+                </button>
+              </nav>
             </div>
-            {#if view === 'history'}
+            {#if view === 'habits'}
             <div class="timeline-main-header">
               <div class="timeline-meta-row">
                 <div class="start-slot">
                   {#if showStartButton}
                     <button class="nav-start" aria-label="Jump to start" onclick={scrollToStart}>← start</button>
                   {/if}
-                  {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
                 </div>
                 <div class="month-nav" aria-label={`Timeline month and year. Currently ${monthOptions[displayMonthIndex]} ${displayYear}`}>
                   <div class="month-slot" aria-hidden="true">
@@ -1701,14 +1208,8 @@
                 {/each}
               </div>
             </div>
-            {:else if view === 'today'}
-              <div class="today-header">
-                <span>{WEEKDAY_LABELS[currentDay.getDay()]} {currentDay.getDate()} {monthOptions[currentDay.getMonth()]}</span>
-                {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
-              </div>
             {:else if view === 'thoughts'}
               <div class="thoughts-header">
-                {#if !online}<span class="offline" aria-live="polite">offline</span>{/if}
               </div>
             {/if}
           </div>
@@ -1773,53 +1274,6 @@
                   />
                 {:else}
                   <button class="add-thought" onclick={beginAddThought}>+ thought</button>
-                {/if}
-              </div>
-            </div>
-          {:else if view === 'today'}
-            <div class="today-list" aria-label="Today's habits">
-              {#each board.habits as habit, habitIndex (habit.id)}
-                {@const value = valueFor(habit.id, todayKey)}
-                <div class="today-row" data-habit-id={habit.id} animate:flip={{ duration: dragActive ? 120 : 0 }}>
-                  <div class="today-habit">
-                    {#if editingHabitId === habit.id}
-                      <input
-                        class="habit-inline-input"
-                        bind:this={editHabitInput}
-                        bind:value={editingHabitName}
-                        aria-label={`Rename ${habit.name}`}
-                        onblur={commitRename}
-                        enterkeyhint="done"
-                        onkeydown={(event) => {
-                          if (event.key === 'Enter') { event.preventDefault(); finishInlineEditFromKeyboard(event.currentTarget); }
-                          if (event.key === 'Escape') { editingHabitId = null; editingHabitName = ''; }
-                        }}
-                      />
-                    {:else}
-                      <button class="today-habit-label" onclick={() => beginRename(habit)}>{habit.name}</button>
-                    {/if}
-                    <div class="today-habit-controls">
-                      <button class="drag-habit" aria-label={`Hold and drag to reorder ${habit.name}`} title="Hold and drag to reorder" onpointerdown={(event) => startItemDrag(event, habit.id, 'habit')}>
-                        <svg class="row-drag-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1"/><circle cx="11" cy="4" r="1"/><circle cx="5" cy="8" r="1"/><circle cx="11" cy="8" r="1"/><circle cx="5" cy="12" r="1"/><circle cx="11" cy="12" r="1"/></svg>
-                      </button>
-                      <button class="delete-habit" aria-label={`Archive ${habit.name}`} title="Archive" onclick={() => archiveHabit(habitIndex)}>
-                        <svg class="row-archive-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.25 5.25h7.5v7.25h-7.5z"/><path d="M5.25 3.25h5.5"/><path d="M8 7v3.25"/><path d="m6.5 8.75 1.5 1.5 1.5-1.5"/></svg>
-                      </button>
-                    </div>
-                  </div>
-                  <button
-                    class="today-mark"
-                    class:plus={value === 2}
-                    aria-label={`${habit.name}, today: ${symbols[value]}`}
-                    onclick={(event) => tapCell(habit.id, todayKey, event.currentTarget)}
-                  >{symbols[value]}</button>
-                </div>
-              {/each}
-              <div class="today-add-row">
-                {#if addingHabit}
-                  <input class="habit-inline-input add-input" bind:this={newHabitInput} bind:value={newHabitName} placeholder="habit" aria-label="New habit" onblur={commitAddHabit} onkeydown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') cancelAddHabit(); }} />
-                {:else}
-                  <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
                 {/if}
               </div>
             </div>
@@ -1973,51 +1427,16 @@
           {/if}
         </div>
       </div>
-      {#if view === 'today' && board.habits.length === 0}
+      {#if view === 'habits' && board.habits.length === 0}
         <section class="zero-tutorial" aria-label="Getting started">
           <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
           <ul class="zero-tutorial-list">
-            <li>tap a habit: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
-            <li>history keeps the full timeline</li>
+            <li>tap today or yesterday: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
+            <li>older days lock</li>
             <li>tap a habit name to rename; drag it to reorder</li>
           </ul>
         </section>
       {/if}
-    </main>
-  {:else}
-    <main class="auth-page">
-      <form class="auth-card" onsubmit={(event) => { event.preventDefault(); void submitAuth(); }}>
-        <div class="auth-wordmark">3tap</div>
-
-        <input aria-label="Email" placeholder="email" type="email" inputmode="email" autocomplete="email" bind:value={authEmail} oninput={() => { authError = ''; authNotice = ''; }} />
-
-        {#if authMode !== 'forgot'}
-          <input aria-label="Password" placeholder="password" type="password" autocomplete={authMode === 'login' ? 'current-password' : 'new-password'} bind:value={authPassword} oninput={() => (authError = '')} />
-        {/if}
-
-        {#if authMode === 'signup'}
-          <ul class="password-rules" aria-label="Password requirements">
-            <li class:valid={authPassword.length >= 8}>{authPassword.length >= 8 ? '✓' : '·'} 8+ characters</li>
-            <li class:valid={authPassword.length > 0 && authPassword.length <= 128}>{authPassword.length > 0 && authPassword.length <= 128 ? '✓' : '·'} 128 characters max</li>
-          </ul>
-        {/if}
-
-        {#if authError}<p class="auth-error" role="alert">{authError}</p>{/if}
-        {#if authNotice}<p class="auth-notice" role="status">{authNotice}</p>{/if}
-
-        <button class="auth-submit" type="submit" disabled={authenticating || (authMode === 'signup' && !validPassword(authPassword))}>
-          {authenticating ? '...' : authMode === 'login' ? 'log in' : authMode === 'signup' ? 'create account' : 'send reset link'}
-        </button>
-
-        {#if authMode === 'login'}
-          <div class="auth-links">
-            <button type="button" onclick={() => { authMode = 'signup'; authError = ''; authNotice = ''; authPassword = ''; }}>create account</button>
-            <button type="button" onclick={() => { authMode = 'forgot'; authError = ''; authNotice = ''; authPassword = ''; }}>forgot password</button>
-          </div>
-        {:else}
-          <button class="auth-switch" type="button" onclick={() => { authMode = 'login'; authError = ''; authNotice = ''; authPassword = ''; }}>back to log in</button>
-        {/if}
-      </form>
     </main>
   {/if}
 
@@ -2037,21 +1456,7 @@
     <section class="panel" aria-modal="true" role="dialog">
       <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
 
-      {#if panel === 'account'}
-        <div class="panel-heading">
-          <h2>account</h2>
-          <p class="account-identity">{credentials?.email || ''}</p>
-        </div>
-
-        <div class="access-section">
-          <button class="panel-button" onclick={logOut}>log out</button>
-        </div>
-
-        <div class="panel-divider"></div>
-        <div class="access-section access-danger-section">
-          <button class="panel-button panel-button-danger" onclick={confirmDeleteBoard}>delete account</button>
-        </div>
-      {:else if panel === 'archived'}
+      {#if panel === 'archived'}
         <div class="panel-heading">
           <h2>archive</h2>
           <p>Archived habits keep their history. Restore one anytime, or delete it permanently.</p>
@@ -2109,16 +1514,6 @@
           <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
           <button class="panel-button panel-button-danger" disabled={clearingArchive} onclick={clearArchive}>
             {clearingArchive ? 'clearing…' : 'clear all'}
-          </button>
-        </div>
-      {:else if panel === 'delete-board'}
-        <h2>delete this account?</h2>
-        <p>This permanently deletes every habit, thought, and all history in this account. This device will start with a new empty account.</p>
-        {#if deleteBoardError}<p class="archive-error" role="alert">{deleteBoardError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'account')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={deletingBoard} onclick={deleteBoardForever}>
-            {deletingBoard ? 'deleting…' : 'delete account'}
           </button>
         </div>
       {/if}
@@ -2274,15 +1669,6 @@
   .brand-slot {
     gap: 10px;
   }
-  .brand-account {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--timeline-text);
-    font-size: 9px;
-    letter-spacing: 0;
-  }
   .top-tools {
     position: absolute;
     top: env(safe-area-inset-top);
@@ -2299,30 +1685,6 @@
   }
   .top-tools .tool-icon:last-child { border-right: var(--line) solid var(--grid); }
   .timeline-side-spacer { width: 100%; height: 100%; }
-  .auth-page {
-    min-height: 100dvh;
-    display: grid;
-    place-items: center;
-    padding: 24px;
-    box-sizing: border-box;
-  }
-  .auth-card { width: min(280px, 100%); display: grid; gap: 10px; }
-  .auth-wordmark { margin-bottom: 16px; text-align: center; color: var(--muted); font-size: 12px; letter-spacing: .12em; }
-  .auth-card input {
-    width: 100%; height: 38px; box-sizing: border-box; border: var(--line) solid var(--grid);
-    border-radius: 0; outline: 0; background: var(--bg); color: var(--text); padding: 0 10px; font-size: 11px;
-  }
-  .auth-card input:focus { border-color: var(--control-active); }
-  .auth-submit { height: 38px; border: var(--line) solid var(--grid); color: var(--control-active); font-size: 11px; }
-  .auth-submit:disabled { opacity: .45; }
-  .auth-switch { justify-self: center; color: var(--muted); font-size: 10px; text-decoration: underline; }
-  .auth-error { min-height: 12px; margin: 0; color: var(--danger); font-size: 10px; }
-  .auth-notice { margin: 0; color: var(--control-active); font-size: 10px; line-height: 1.5; }
-  .password-rules { list-style: none; margin: -2px 0 2px; padding: 0; color: var(--muted); font-size: 9px; line-height: 1.65; }
-  .password-rules li.valid { color: var(--control-active); }
-  .auth-links { display: flex; justify-content: center; gap: 18px; }
-  .auth-links button { color: var(--muted); font-size: 10px; text-decoration: underline; }
-  .account-identity { color: var(--control-active) !important; }
   @media (max-width: 620px) {
     .brand-slot { width: var(--habit-width); padding-left: 12px; }
     .top-tools { grid-template-columns: repeat(3, var(--day-size)); }
@@ -2385,7 +1747,6 @@
   }
   .nav-menu .theme-tool { color: var(--icon-theme); }
   .nav-menu .theme-tool .icon-fill { fill: currentColor; }
-  .nav-menu .logout-menu-button { color: var(--muted); }
   .nav-menu .archive-menu-button { color: var(--icon-archive); }
   .start-slot,
   .month-nav,
@@ -2415,7 +1776,6 @@
     overflow: visible;
     letter-spacing: 0;
   }
-  .offline { font-size: 9px; opacity: .45; white-space: nowrap; }
   button { border: 0; background: none; padding: 0; cursor: pointer; }
   .nav-start,
   .nav-today {
@@ -3048,8 +2408,6 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   }
   .panel-button:disabled { opacity: .38; cursor: default; }
   .panel-button:not(:disabled):active { background: var(--press-fill); }
-  .access-section { display: grid; justify-items: start; }
-  .access-danger-section { padding-bottom: 1px; }
   .archive-section,
   .archive-empty-state,
   .archive-danger-section {
@@ -3121,37 +2479,4 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   .archive-toast strong { font-weight: 600; }
   .archive-toast button { flex: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 
-
-  .today-header {
-    flex: 1; min-width: 0; height: var(--day-size); padding: 0 14px;
-    display: flex; align-items: center; justify-content: space-between;
-    color: var(--control-text); font-size: 11px; letter-spacing: .02em;
-  }
-  .today-list { width: min(100%, 680px); border-right: var(--line) solid var(--grid); }
-  .today-row {
-    height: var(--day-size); display: grid; grid-template-columns: minmax(0, 1fr) var(--day-size);
-    border-bottom: var(--line) solid var(--grid); background: var(--bg);
-  }
-  .today-habit { min-width: 0; padding: 0 8px 0 var(--page-inset); display: flex; align-items: center; gap: 5px; }
-  .today-habit-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: 12px; font-weight: 500; }
-  .today-habit-controls { margin-left: auto; display: grid; grid-template-columns: repeat(2, 30px); align-items: center; opacity: .72; }
-  .today-habit-controls button { width: 30px; height: 36px; display: grid; place-items: center; color: var(--control-text); }
-  .today-habit-controls svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
-  .today-habit-controls .row-drag-icon { fill: currentColor; stroke: none; }
-  .today-mark {
-    position: relative; display: grid; place-items: center; width: var(--day-size); height: var(--day-size);
-    border-left: var(--line) solid var(--grid); background: var(--today-fill); color: var(--today-accent);
-    font-size: 16px; font-weight: 600; -webkit-tap-highlight-color: transparent;
-  }
-  .today-mark.plus { font-size: 18px; }
-  .today-mark:active { background: var(--press-fill); }
-  .today-add-row { height: var(--day-size); padding: 0 var(--page-inset); display: flex; align-items: center; border-bottom: var(--line) solid var(--grid); }
-  @media (hover: hover) and (pointer: fine) {
-    .today-row:hover .today-habit-controls { opacity: 1; }
-    .today-mark:hover { background: var(--hover); }
-  }
-  @media (max-width: 560px) {
-    .today-list { width: 100%; border-right: 0; }
-    .today-habit-controls { opacity: .68; }
-  }
 </style>

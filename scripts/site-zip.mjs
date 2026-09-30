@@ -12,8 +12,6 @@ const exclusions = [
   'build/*',
   'dist/*',
   'coverage/*',
-  'supabase/.temp/*',
-  'supabase/.branches/*',
   '*.zip',
   '.DS_Store',
   '.env',

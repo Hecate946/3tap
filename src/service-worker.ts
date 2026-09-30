@@ -20,7 +20,7 @@ worker.addEventListener('activate', (event) => {
 worker.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
-  if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
+  if (url.origin !== location.origin) return;
 
   if (IMMUTABLE.has(url.pathname)) {
     event.respondWith(caches.match(event.request).then((cached) => cached ?? fetch(event.request)));

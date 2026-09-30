@@ -1,29 +1,27 @@
 # 3tap
 
-a tiny habit tracker I made for myself to stay accountable. tap each habit `-` → `|` → `+`, jot thoughts, and look back at history.
+A tiny habit tracker I made for myself to stay accountable. Tap a habit once for `|`, twice for `+`, or leave it at `-`.
 
-## local
+## stack
+
+SvelteKit + IndexedDB. Everything stays on this browser/device. No accounts, passwords, backend, database server, or sync yet.
+
+## local dev
 
 ```bash
 npm install
 npm run dev
 ```
 
-`npm run dev` starts local Supabase, applies pending migrations, and starts Vite. Docker needs to be running.
+Then open `http://localhost:5173`.
 
-### password-reset email
+## production
 
-3tap owns the account/password database itself and uses Resend only to deliver reset links. There are no recovery codes.
+```bash
+npm run check
+npm run build
+```
 
-One-time setup:
+Cloudflare only serves the app now. There are no Supabase or database environment variables to configure.
 
-1. In Resend, add and verify `3tap.cc` as a sending domain.
-2. Create a Resend API key.
-3. For local development, copy `.env.example` to `.env` and put the key in `RESEND_API_KEY`.
-4. For production, add `RESEND_API_KEY` once as a **runtime secret** on the Cloudflare Worker. `RESET_EMAIL_FROM` and `APP_ORIGIN` are already configured in `wrangler.jsonc`.
-
-After that the exact same flow works locally and in production: **forgot password → email → 30-minute single-use link → new password**. Resetting a password signs out existing sessions.
-
-## deploy
-
-Cloudflare deploys from GitHub. Set `SUPABASE_DB_URL` as a Cloudflare **build secret** once; `npm run build` applies pending migrations before every production build. Runtime also needs `SUPABASE_SERVICE_ROLE_KEY`, `RESEND_API_KEY`, and `SUPABASE_URL` (the URL is already in `wrangler.jsonc`).
+Habit data is stored in IndexedDB on each device. Clearing site data also clears 3tap data.

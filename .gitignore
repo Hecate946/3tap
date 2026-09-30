@@ -2,11 +2,9 @@ node_modules/
 .svelte-kit/
 .wrangler/
 .env*
-!.env.example
 .dev.vars
 build/
 .DS_Store
-supabase/.temp/
 secrets.txt
 3tap-source.zip
 worker-configuration.d.ts

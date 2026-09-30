@@ -28,12 +28,4 @@ export type Board = {
   archivedHabits?: Habit[];
   thoughts?: Thought[];
   entries: Entry[];
-  entriesDelta?: boolean;
-};
-
-export type Credentials = {
-  boardId: string;
-  secret: string;
-  pendingCreate?: boolean;
-  email?: string;
 };
