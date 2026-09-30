@@ -1889,6 +1889,14 @@
     background: var(--grid);
     pointer-events: none;
   }
+  .timeline-controls {
+    width: 100%;
+    height: var(--day-size);
+    margin-top: 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: stretch;
+  }
 
   .tool-icon {
     position: relative;
@@ -1930,6 +1938,7 @@
     stroke-linejoin: round;
     pointer-events: none;
   }
+  .tool-icon .icon-fill { fill: currentColor; }
   .tool-icon:active::before { opacity: .18; }
   .tool-icon:focus-visible { outline: none; }
   .tool-icon:focus-visible::before { opacity: .12; }
