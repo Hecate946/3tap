@@ -89,22 +89,19 @@
   let dragPendingY: number | null = null;
   let dragLastClientY: number | null = null;
   let dragHoldTimer: ReturnType<typeof setTimeout> | undefined;
-  // A calendar gesture is either a stationary edit or a drag to pan the timeline.
-  // Store the starting cell on the scroll container: mouse pointer capture moves
-  // pointerup away from the button, so button-level handlers cannot complete taps.
-  let calendarPress: {
+  // Resolve a press at pointerup, before browsers dispatch their synthetic click.
+  // This makes a single stationary press edit immediately, while a moving pointer
+  // still pans the calendar without accidentally modifying a mark.
+  const TIMELINE_DRAG_THRESHOLD = 7;
+  let timelineGesture: {
     pointerId: number;
-    habitId: string;
-    date: string;
-    button: HTMLButtonElement;
+    pointerType: string;
     startX: number;
     startY: number;
+    startScrollLeft: number;
+    pressedCell: HTMLButtonElement | null;
     moved: boolean;
   } | null = null;
-  let timelinePanPointerId: number | null = null;
-  let timelinePanStartX = 0;
-  let timelinePanStartY = 0;
-  let timelinePanStartScrollLeft = 0;
   let timelinePanActive = false;
   let timelineTouchId: number | null = null;
   let timelineTouchStartX = 0;
@@ -325,7 +322,7 @@
 
     const compensation = inserted * metrics.dayWidth;
     scroller.scrollLeft = beforeScrollLeft + compensation;
-    if (timelinePanPointerId !== null) timelinePanStartScrollLeft += compensation;
+    if (timelineGesture?.pointerType === 'mouse') timelineGesture.startScrollLeft += compensation;
     if (timelineTouchId !== null) timelineTouchStartScrollLeft += compensation;
   }
 
@@ -375,79 +372,90 @@
   }
 
   function startTimelinePan(event: PointerEvent) {
-    if (view !== 'habits' || !scroller || event.button !== 0 || !event.isPrimary || dragActive) return;
+    if (view !== 'habits' || !scroller || dragActive || !event.isPrimary ||
+        (event.pointerType === 'mouse' && event.button !== 0)) return;
     const target = event.target as HTMLElement | null;
-    const cell = target?.closest<HTMLButtonElement>('button.cell');
-    calendarPress = cell && !cell.disabled && cell.dataset.habitId && cell.dataset.date
-      ? {
-          pointerId: event.pointerId,
-          habitId: cell.dataset.habitId,
-          date: cell.dataset.date,
-          button: cell,
-          startX: event.clientX,
-          startY: event.clientY,
-          moved: false
-        }
-      : null;
-
-    // Touch panning remains native/handled by the touch-scroll listeners below.
-    // Only mouse drags need explicit pointer capture and preventDefault.
-    if (event.pointerType !== 'mouse') return;
     if (target?.closest('.habit-name, .timeline-side, input, textarea, button:not(.cell)')) return;
 
-    event.preventDefault();
-    timelinePanPointerId = event.pointerId;
-    timelinePanStartX = event.clientX;
-    timelinePanStartY = event.clientY;
-    timelinePanStartScrollLeft = scroller.scrollLeft;
+    // Track the exact cell where the press began. Do not call preventDefault,
+    // since mouse, touch and assistive inputs must all remain accessible.
     timelinePanActive = false;
-    scroller.setPointerCapture?.(event.pointerId);
+    timelineGesture = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      startX: event.clientX,
+      startY: event.clientY,
+      startScrollLeft: scroller.scrollLeft,
+      pressedCell: target?.closest<HTMLButtonElement>('button.cell:not(:disabled)') ?? null,
+      moved: false
+    };
   }
 
   function moveTimelinePan(event: PointerEvent) {
-    // Mark any meaningful movement as a drag, including vertical touch gestures.
-    const press = calendarPress;
-    if (press && press.pointerId === event.pointerId &&
-        Math.hypot(event.clientX - press.startX, event.clientY - press.startY) >= 6) {
-      press.moved = true;
-    }
+    const gesture = timelineGesture;
+    if (!gesture || !scroller || event.pointerId !== gesture.pointerId) return;
+    const dx = event.clientX - gesture.startX;
+    const dy = event.clientY - gesture.startY;
+    if (Math.hypot(dx, dy) < TIMELINE_DRAG_THRESHOLD && !gesture.moved) return;
 
-    if (!scroller || event.pointerId !== timelinePanPointerId) return;
-    const dx = event.clientX - timelinePanStartX;
-    if (!timelinePanActive && Math.abs(dx) < 6) return;
+    // Once the pointer moves past the threshold, this gesture can only scroll.
+    // Never allow pointerup or the browser's subsequent click to edit the cell.
+    gesture.moved = true;
+    if (gesture.pointerType !== 'mouse') return; // the touch listeners scroll
     if (!timelinePanActive) {
+      if (Math.abs(dx) <= Math.abs(dy)) return;
       timelinePanActive = true;
       document.documentElement.classList.add('timeline-panning-cursor');
+      scroller.setPointerCapture?.(event.pointerId);
     }
     event.preventDefault();
-    scroller.scrollLeft = timelinePanStartScrollLeft - dx;
+    scroller.scrollLeft = gesture.startScrollLeft - dx;
   }
 
   function endTimelinePan(event: PointerEvent) {
-    const pressed = calendarPress?.pointerId === event.pointerId ? calendarPress : null;
-    if (pressed) calendarPress = null;
+    const gesture = timelineGesture;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    // Keep the original pressed cell so an ordinary tap can finish even if
+    // Svelte has re-rendered a neighboring cell while the pointer was down.
+    const cell = gesture.pressedCell;
+    const dx = event.clientX - gesture.startX;
+    const dy = event.clientY - gesture.startY;
+    const isTap = event.type === 'pointerup' && !gesture.moved &&
+      Math.hypot(dx, dy) < TIMELINE_DRAG_THRESHOLD && !timelinePanActive;
 
-    const wasPanning = event.pointerId === timelinePanPointerId && timelinePanActive;
-    if (scroller && event.pointerId === timelinePanPointerId) {
-      if (scroller.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
-      timelinePanPointerId = null;
-      timelinePanActive = false;
-      document.documentElement.classList.remove('timeline-panning-cursor');
+    if (scroller && timelinePanActive && scroller.hasPointerCapture?.(event.pointerId)) {
+      scroller.releasePointerCapture(event.pointerId);
     }
+    timelineGesture = null;
+    timelinePanActive = false;
+    document.documentElement.classList.remove('timeline-panning-cursor');
 
-    if (event.type === 'pointerup' && pressed && !pressed.moved && !wasPanning) {
-      tapCell(pressed.habitId, pressed.date, pressed.button);
+    // Do not depend on a synthetic click (which may be delayed or cancelled by
+    // scrolling). Commit once, immediately on pointerup, and only on the cell
+    // pressed originally. Keyboard activation is handled separately below.
+    if (isTap && cell && !cell.disabled) {
+      const bounds = cell.getBoundingClientRect();
+      if (event.clientX >= bounds.left && event.clientX <= bounds.right &&
+          event.clientY >= bounds.top && event.clientY <= bounds.bottom) {
+        const { habitId, date } = cell.dataset;
+        if (habitId && date) tapCell(habitId, date, cell);
+      }
     }
   }
 
   function cleanupTimelinePan() {
-    if (scroller && timelinePanPointerId !== null && scroller.hasPointerCapture?.(timelinePanPointerId)) {
-      scroller.releasePointerCapture(timelinePanPointerId);
+    if (scroller && timelineGesture && scroller.hasPointerCapture?.(timelineGesture.pointerId)) {
+      scroller.releasePointerCapture(timelineGesture.pointerId);
     }
-    timelinePanPointerId = null;
+    timelineGesture = null;
     timelinePanActive = false;
-    calendarPress = null;
     document.documentElement.classList.remove('timeline-panning-cursor');
+  }
+
+  function onHistoryCellClick(event: MouseEvent, habitId: string, date: string) {
+    // Pointer edits are committed immediately on pointerup, before click fires.
+    // Native keyboard/assistive activation has detail=0 and must still work.
+    if (event.detail === 0) tapCell(habitId, date, event.currentTarget as HTMLButtonElement);
   }
 
   function startTimelineTouch(event: TouchEvent) {
@@ -1386,11 +1394,7 @@
                       aria-label={`${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', view only'}`}
                       data-habit-id={habit.id}
                       data-date={date.key}
-                      onclick={(event) => {
-                        // Pointer gestures are resolved on the scroll container;
-                        // keyboard-initiated clicks still activate cells normally.
-                        if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}>{symbols[value]}</button>
+                      onclick={(event) => onHistoryCellClick(event, habit.id, date.key)}>{symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
@@ -1462,7 +1466,7 @@
     --selection-text: #0b1b2b;
     --shadow: rgba(17,17,15,.16);
     /* Same icon colors in light and dark mode. */
-    --today-button-color: #26753b;
+    --today-button-color: #206b36;
     --today-button-border: var(--today-button-color);
     --icon-today: var(--today-button-color);
     --icon-habits: #225866;
@@ -1471,6 +1475,7 @@
     --icon-theme: #d3a000;
     --history-edit-surface: #fff2bf;
     --history-edit-border: #d8bf74;
+    --history-edit-hover: rgba(138, 103, 25, .14);
     background: var(--bg);
     color-scheme: light;
   }
@@ -1488,7 +1493,8 @@
     --timeline-mark: #b2b9b8;
     --history-mode-accent: #efc95a;
     --history-edit-surface: #393013;
-    --history-edit-border: #71602d;
+    --history-edit-border: #98803a;
+    --history-edit-hover: rgba(253, 222, 122, .16);
     --press-fill: rgba(255,255,248,.16);
     --selection-bg: #315f8f;
     --selection-text: #ffffff;
@@ -2127,20 +2133,23 @@ tbody tr .habit-name + td::before { display: none; }
   @media (max-width: 620px) {
     .history-controls { padding-left: 12px; padding-right: 12px; gap: 12px; }
   }
-  /* Edit highlighting belongs to the calendar squares themselves, not to
-     individual buttons: no uneven shades from hover, opacity or mark state. */
-  .grid-scroll.history-editing tbody td {
-    background: var(--history-edit-surface);
+  /* Keep every square uniformly yellow in edit mode; a small inset ring and
+     tint on hover identify the precise square that a click will change. */
+  .grid-scroll.history-editing tbody td { background: var(--history-edit-surface); }
+  .grid-scroll.history-editing .cell { background: transparent; opacity: 1; }
+  @media (hover: hover) and (pointer: fine) {
+    .grid-scroll.history-editing .cell:not(:disabled):hover {
+      background: var(--history-edit-hover);
+      box-shadow: inset 0 0 0 2px var(--history-edit-border);
+    }
   }
-  .grid-scroll.history-editing .cell,
-  .grid-scroll.history-editing .cell:not(:disabled):hover,
   .grid-scroll.history-editing .cell:not(:disabled):active {
-    background: transparent;
-    opacity: 1;
+    background: var(--history-edit-hover);
+    box-shadow: inset 0 0 0 2px var(--history-edit-border);
   }
   .grid-scroll.history-editing .cell:not(:disabled):focus-visible {
-    outline: 1px solid var(--history-edit-border);
-    outline-offset: -1px;
+    outline: 2px solid var(--history-edit-border);
+    outline-offset: -2px;
   }
   td { text-align: center; background: transparent; }
 tbody tr td.enrolled::before { background: var(--grid); }
