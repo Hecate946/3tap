@@ -17,18 +17,14 @@
   let board: Board | null = fixtureBoard;
   let ready = fixtureMode;
   let theme: 'light' | 'dark' = 'light';
-  let view: 'habits' | 'thoughts' = 'habits';
-  let navMenuOpen = false;
-  let panel: 'none' | 'archived' | 'delete' | 'clear' = 'none';
-  let archiveToast: { habit: Habit; index: number } | null = null;
-  let archiveToastTimer: ReturnType<typeof setTimeout> | undefined;
-  let deleteHabitTarget: Habit | null = null;
-  let deletingHabit = false;
-  let archiveError = '';
-  let clearingArchive = false;
+  let view: 'today' | 'habits' | 'thoughts' = 'today';
+  const LAST_VIEW_KEY = '3tap.view';
   let editingHabitId: string | null = null;
   let editingHabitName = '';
   let addingHabit = false;
+  let confirmingClearHistory = false;
+  // History opens in read-only mode; entering edit mode is always intentional.
+  let historyEditing = false;
   let newHabitName = '';
   let editHabitInput: HTMLInputElement;
   let newHabitInput: HTMLInputElement;
@@ -51,11 +47,27 @@
   let shiftingWindow = false;
   let scrollRaf = 0;
   const DAY_SIZE = 48;
-  const HABIT_WIDTH = DAY_SIZE * 3;
   const WINDOW_DAYS = 14;
   const WINDOW_SHIFT = 7;
+  let viewportWidth = browser ? window.innerWidth : 1024;
+
+  // The history sidebar only needs enough room for the heading or the longest habit
+  // plus its reorder/delete controls. Keep at least two day cells visible on phones.
+  function historySidebarWidth(habits: Habit[], width: number) {
+    const measuringContext = browser ? document.createElement('canvas').getContext('2d') : null;
+    if (measuringContext) measuringContext.font = '500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+    const textWidth = (text: string) => measuringContext
+      ? measuringContext.measureText(text).width
+      : text.length * 7.25;
+    const titleWidth = textWidth('HISTORY') + 32;
+    const nameWidth = Math.max(0, ...habits.map((habit) => textWidth(habit.name)));
+    const fullWidth = Math.ceil(Math.max(88, titleWidth, nameWidth + 91));
+    return Math.min(fullWidth, Math.max(88, width - DAY_SIZE * 2));
+  }
+  let habitWidth = historySidebarWidth(board?.habits ?? [], viewportWidth);
+  $: habitWidth = historySidebarWidth(board?.habits ?? [], viewportWidth);
   let minimumVisibleDays = browser
-    ? Math.max(1, Math.ceil((window.innerWidth - HABIT_WIDTH) / DAY_SIZE) + 1)
+    ? Math.max(1, Math.ceil((viewportWidth - habitWidth) / DAY_SIZE) + 1)
     : 32;
   let windowStartOffset = -(Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT) - 1);
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -77,9 +89,21 @@
   let dragPendingY: number | null = null;
   let dragLastClientY: number | null = null;
   let dragHoldTimer: ReturnType<typeof setTimeout> | undefined;
-  const cellPresses = new Map<number, { habitId: string; date: string; button: HTMLButtonElement; startX: number; startY: number; moved: boolean }>();
+  // A calendar gesture is either a stationary edit or a drag to pan the timeline.
+  // Store the starting cell on the scroll container: mouse pointer capture moves
+  // pointerup away from the button, so button-level handlers cannot complete taps.
+  let calendarPress: {
+    pointerId: number;
+    habitId: string;
+    date: string;
+    button: HTMLButtonElement;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null = null;
   let timelinePanPointerId: number | null = null;
   let timelinePanStartX = 0;
+  let timelinePanStartY = 0;
   let timelinePanStartScrollLeft = 0;
   let timelinePanActive = false;
   let timelineTouchId: number | null = null;
@@ -89,7 +113,9 @@
   let timelineTouchAxis: '' | 'x' | 'y' = '';
 
   const entries = new SvelteMap<string, Entry>();
-  const habitStartKeys = new Map<string, string>();
+  // Trigger legacy-component updates when a mark changes inside SvelteMap.
+  let marksRevision = 0;
+  $: historyMarkCount = (marksRevision, entries.size);
   const symbols: Record<MarkValue, string> = { 0: '-', 1: '|', 2: '+' };
   for (const entry of board?.entries ?? []) {
     if (entry.value !== 0) entries.set(cellKey(entry.habitId, entry.date), entry);
@@ -180,19 +206,10 @@
     return date === todayKey || date === yesterdayKey;
   }
 
-  function habitStartKey(habit: Habit) {
-    const cached = habitStartKeys.get(habit.id);
-    if (cached) return cached;
-    if (!habit.createdAt) return enrolledKey;
-    const created = new Date(habit.createdAt);
-    const key = dateKey(new Date(created.getFullYear(), created.getMonth(), created.getDate(), 12));
-    habitStartKeys.set(habit.id, key);
-    return key;
-  }
-
-  function isBeforeHabitStart(habit: Habit, date: string) {
-    const start = habitStartKey(habit);
-    return Boolean(start && date < start);
+  function canEditCell(date: string) {
+    return view === 'habits'
+      ? historyEditing && date <= todayKey
+      : isEditableDate(date);
   }
 
   function hydrateEntries(source: Board | null) {
@@ -202,7 +219,8 @@
     }
   }
 
-  function valueFor(habitId: string, date: string): MarkValue {
+  function valueFor(habitId: string, date: string, revision?: number): MarkValue {
+    void revision;
     return (entries.get(cellKey(habitId, date))?.value ?? 0) as MarkValue;
   }
 
@@ -241,12 +259,13 @@
   }
 
   function tapCell(habitId: string, date: string, button?: HTMLButtonElement) {
-    if (!isEditableDate(date)) return;
+    if (!canEditCell(date)) return;
     const current = valueFor(habitId, date);
     const next = ((current + 1) % 3) as MarkValue;
     const key = cellKey(habitId, date);
     if (next === 0) entries.delete(key);
     else entries.set(key, { habitId, date, value: next as 1 | 2 });
+    marksRevision += 1;
 
     if (button) {
       button.textContent = symbols[next];
@@ -257,36 +276,7 @@
     schedulePersistence();
   }
 
-  function startCellPress(event: PointerEvent, habitId: string, date: string) {
-    if (event.button !== 0 || !isEditableDate(date)) return;
-    cellPresses.set(event.pointerId, {
-      habitId,
-      date,
-      button: event.currentTarget as HTMLButtonElement,
-      startX: event.clientX,
-      startY: event.clientY,
-      moved: false
-    });
-  }
-
-  function moveCellPress(event: PointerEvent) {
-    const press = cellPresses.get(event.pointerId);
-    if (!press || press.moved) return;
-    if (Math.hypot(event.clientX - press.startX, event.clientY - press.startY) > 6) press.moved = true;
-  }
-
-  function endCellPress(event: PointerEvent) {
-    const press = cellPresses.get(event.pointerId);
-    cellPresses.delete(event.pointerId);
-    if (press && !press.moved) tapCell(press.habitId, press.date, press.button);
-  }
-
-  function cancelCellPress(event: PointerEvent) {
-    cellPresses.delete(event.pointerId);
-  }
-
-
-  function timelineMetrics() { return { dayWidth: DAY_SIZE, habitWidth: HABIT_WIDTH }; }
+  function timelineMetrics() { return { dayWidth: DAY_SIZE, habitWidth }; }
 
   function updateMinimumVisibleDays() {
     if (!scroller) return false;
@@ -385,25 +375,46 @@
   }
 
   function startTimelinePan(event: PointerEvent) {
-    if (view !== 'habits') return;
-    if (!scroller || event.button !== 0 || !event.isPrimary || dragActive) return;
-    if (event.pointerType !== 'mouse') return;
+    if (view !== 'habits' || !scroller || event.button !== 0 || !event.isPrimary || dragActive) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
+    const cell = target?.closest<HTMLButtonElement>('button.cell');
+    calendarPress = cell && !cell.disabled && cell.dataset.habitId && cell.dataset.date
+      ? {
+          pointerId: event.pointerId,
+          habitId: cell.dataset.habitId,
+          date: cell.dataset.date,
+          button: cell,
+          startX: event.clientX,
+          startY: event.clientY,
+          moved: false
+        }
+      : null;
+
+    // Touch panning remains native/handled by the touch-scroll listeners below.
+    // Only mouse drags need explicit pointer capture and preventDefault.
+    if (event.pointerType !== 'mouse') return;
+    if (target?.closest('.habit-name, .timeline-side, input, textarea, button:not(.cell)')) return;
 
     event.preventDefault();
     timelinePanPointerId = event.pointerId;
     timelinePanStartX = event.clientX;
+    timelinePanStartY = event.clientY;
     timelinePanStartScrollLeft = scroller.scrollLeft;
     timelinePanActive = false;
     scroller.setPointerCapture?.(event.pointerId);
   }
 
   function moveTimelinePan(event: PointerEvent) {
+    // Mark any meaningful movement as a drag, including vertical touch gestures.
+    const press = calendarPress;
+    if (press && press.pointerId === event.pointerId &&
+        Math.hypot(event.clientX - press.startX, event.clientY - press.startY) >= 6) {
+      press.moved = true;
+    }
+
     if (!scroller || event.pointerId !== timelinePanPointerId) return;
     const dx = event.clientX - timelinePanStartX;
-    const threshold = 2;
-    if (!timelinePanActive && Math.abs(dx) < threshold) return;
+    if (!timelinePanActive && Math.abs(dx) < 6) return;
     if (!timelinePanActive) {
       timelinePanActive = true;
       document.documentElement.classList.add('timeline-panning-cursor');
@@ -413,16 +424,29 @@
   }
 
   function endTimelinePan(event: PointerEvent) {
-    if (!scroller || event.pointerId !== timelinePanPointerId) return;
-    if (scroller.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
-    timelinePanPointerId = null;
-    timelinePanActive = false;
-    document.documentElement.classList.remove('timeline-panning-cursor');
+    const pressed = calendarPress?.pointerId === event.pointerId ? calendarPress : null;
+    if (pressed) calendarPress = null;
+
+    const wasPanning = event.pointerId === timelinePanPointerId && timelinePanActive;
+    if (scroller && event.pointerId === timelinePanPointerId) {
+      if (scroller.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
+      timelinePanPointerId = null;
+      timelinePanActive = false;
+      document.documentElement.classList.remove('timeline-panning-cursor');
+    }
+
+    if (event.type === 'pointerup' && pressed && !pressed.moved && !wasPanning) {
+      tapCell(pressed.habitId, pressed.date, pressed.button);
+    }
   }
 
   function cleanupTimelinePan() {
+    if (scroller && timelinePanPointerId !== null && scroller.hasPointerCapture?.(timelinePanPointerId)) {
+      scroller.releasePointerCapture(timelinePanPointerId);
+    }
     timelinePanPointerId = null;
     timelinePanActive = false;
+    calendarPress = null;
     document.documentElement.classList.remove('timeline-panning-cursor');
   }
 
@@ -434,7 +458,8 @@
       return;
     }
     const target = event.target as HTMLElement | null;
-    if (target?.closest('.habit-name, .timeline-side, .add-row, .zero-add-row, input, textarea, button:not(:disabled)')) return;
+    // Touch swipes must also work when they begin on an editable date square.
+    if (target?.closest('.habit-name, .timeline-side, input, textarea, button:not(.cell)')) return;
     const touch = event.touches[0];
     timelineTouchId = touch.identifier;
     timelineTouchStartX = touch.clientX;
@@ -469,11 +494,23 @@
     timelineTouchAxis = '';
   }
 
-  async function switchView(next: 'habits' | 'thoughts') {
+  async function switchView(next: 'today' | 'habits' | 'thoughts') {
     if (next === view) return;
     if (view === 'habits' && scroller) savedHabitScrollLeft = scroller.scrollLeft;
+    // The timeline is unmounted on Today, so restore its mobile swipe listeners when reopened.
+    scroller?.removeEventListener('touchstart', startTimelineTouch);
+    scroller?.removeEventListener('touchmove', moveTimelineTouch);
+    scroller?.removeEventListener('touchend', endTimelineTouch);
+    scroller?.removeEventListener('touchcancel', endTimelineTouch);
+    confirmingClearHistory = false;
+    historyEditing = false;
     view = next;
+    if (!fixtureMode) localStorage.setItem(LAST_VIEW_KEY, next);
     await tick();
+    scroller?.addEventListener('touchstart', startTimelineTouch, { passive: true });
+    scroller?.addEventListener('touchmove', moveTimelineTouch, { passive: false });
+    scroller?.addEventListener('touchend', endTimelineTouch, { passive: true });
+    scroller?.addEventListener('touchcancel', endTimelineTouch, { passive: true });
     if (next === 'habits' && scroller) {
       scroller.scrollLeft = savedHabitScrollLeft;
       if (savedHabitScrollLeft === 0) await scrollToToday();
@@ -738,8 +775,7 @@
     const dy = event.clientY - dragCandidate.startY;
     if (!dragActive) {
       const distance = Math.hypot(dx, dy);
-      if (dragCandidate.kind === 'thought' && distance >= 5) activateItemDrag(event.clientY);
-      else if (dragCandidate.kind === 'habit' && distance > 8) {
+      if (distance > 8) {
         cleanupItemDrag(false);
         return;
       }
@@ -782,12 +818,10 @@
     if (!board || event.button !== 0 || !event.isPrimary) return;
     if (kind === 'habit' && editingHabitId === itemId) return;
     if (kind === 'thought' && editingThoughtId === itemId) return;
-    const target = event.target as HTMLElement;
-    if (kind === 'thought' && target.closest('.thought-controls, input')) return;
     const handle = event.currentTarget as HTMLElement;
     const dragSurface = handle.closest<HTMLElement>(kind === 'habit' ? '.habit-name, .today-habit' : '.thought-cell') ?? handle;
     const rect = dragSurface.getBoundingClientRect();
-    if (kind === 'habit' && event.pointerType === 'mouse') event.preventDefault();
+    if (event.pointerType === 'mouse') event.preventDefault();
     dragPointerId = event.pointerId;
     dragCandidate = {
       itemId,
@@ -799,127 +833,23 @@
     window.addEventListener('pointermove', onItemDragMove, { passive: false });
     window.addEventListener('pointerup', onItemDragEnd);
     window.addEventListener('pointercancel', onItemDragCancel);
-    if (kind === 'habit') {
-      dragHoldTimer = setTimeout(() => {
-        dragHoldTimer = undefined;
-        if (dragCandidate && dragPointerId === event.pointerId) activateItemDrag(dragCandidate.startY);
-      }, 180);
-    }
+    dragHoldTimer = setTimeout(() => {
+      dragHoldTimer = undefined;
+      if (dragCandidate && dragPointerId === event.pointerId) activateItemDrag(dragCandidate.startY);
+    }, 180);
   }
 
-  function undoArchiveToast() {
-    if (!archiveToast) return;
-    restoreArchivedHabit(archiveToast.habit, archiveToast.index);
-  }
-
-  function showArchiveToast(habit: Habit, index: number) {
-    if (archiveToastTimer) clearTimeout(archiveToastTimer);
-    archiveToast = { habit, index };
-    archiveToastTimer = setTimeout(() => {
-      archiveToast = null;
-      archiveToastTimer = undefined;
-    }, 8000);
-  }
-
-  function archiveHabit(index: number) {
+  function deleteHabit(id: string) {
     if (!board) return;
-    const removed = board.habits[index];
-    if (!removed) return;
-
-    const archived = { ...removed, archivedAt: new Date().toISOString() };
-    board = {
-      ...board,
-      archivedHabits: [archived, ...(board.archivedHabits ?? []).filter((habit) => habit.id !== removed.id)]
-    };
-    setLocalHabits(board.habits.filter((_, i) => i !== index));
-    showArchiveToast(archived, index);
-  }
-
-  function restoreArchivedHabit(habit: Habit, preferredIndex?: number) {
-    if (!board) return;
-    const archivedHabits = (board.archivedHabits ?? []).filter((item) => item.id !== habit.id);
-    const restored = { ...habit, archivedAt: undefined };
-    const active = [...board.habits];
-    const index = Math.max(0, Math.min(preferredIndex ?? active.length, active.length));
-    active.splice(index, 0, restored);
-    board = { ...board, archivedHabits };
-    setLocalHabits(active);
-
-    if (archiveToast?.habit.id === habit.id) {
-      archiveToast = null;
-      if (archiveToastTimer) clearTimeout(archiveToastTimer);
-      archiveToastTimer = undefined;
+    if (editingHabitId === id) {
+      editingHabitId = null;
+      editingHabitName = '';
     }
-  }
-
-  function openArchived() {
-    navMenuOpen = false;
-    panel = 'archived';
-  }
-
-  function confirmPermanentDelete(habit: Habit) {
-    archiveError = '';
-    deleteHabitTarget = habit;
-    panel = 'delete';
-  }
-
-  function confirmClearArchive() {
-    if (!board?.archivedHabits?.length) return;
-    archiveError = '';
-    panel = 'clear';
-  }
-
-  function archivedHistoryDays(habit: Habit) {
-    if (!habit.createdAt) return 0;
-    const start = new Date(habit.createdAt);
-    const end = habit.archivedAt ? new Date(habit.archivedAt) : new Date();
-    const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 12);
-    const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 12);
-    return Math.max(1, calendarDayDistance(startDay, endDay) + 1);
-  }
-
-
-  async function deleteHabitForever() {
-    if (!board || !deleteHabitTarget || deletingHabit) return;
-    const target = deleteHabitTarget;
-    deletingHabit = true;
-    archiveError = '';
-
-    try {
-      for (const [key, entry] of entries) if (entry.habitId === target.id) entries.delete(key);
-      board = {
-        ...board,
-        archivedHabits: (board.archivedHabits ?? []).filter((habit) => habit.id !== target.id),
-        entries: []
-      };
-      deleteHabitTarget = null;
-      await persistLocalStateNow();
-      panel = 'archived';
-    } catch {
-      archiveError = 'could not delete local data';
-    } finally {
-      deletingHabit = false;
+    for (const [key, entry] of entries) {
+      if (entry.habitId === id) entries.delete(key);
     }
-  }
-
-  async function clearArchive() {
-    if (!board || clearingArchive) return;
-    const archived = [...(board.archivedHabits ?? [])];
-    if (!archived.length) { panel = 'archived'; return; }
-    clearingArchive = true;
-    archiveError = '';
-
-    try {
-      const archivedIds = new Set(archived.map((habit) => habit.id));
-      for (const [key, entry] of entries) if (archivedIds.has(entry.habitId)) entries.delete(key);
-      board = { ...board, archivedHabits: [], entries: [] };
-      await persistLocalStateNow();
-      panel = 'archived';
-    } catch {
-      archiveError = 'could not clear local data';
-    } finally {
-      clearingArchive = false;
-    }
+    marksRevision += 1;
+    setLocalHabits(board.habits.filter((habit) => habit.id !== id));
   }
 
   async function beginAddHabit() {
@@ -946,11 +876,19 @@
     newHabitName = '';
   }
 
+  function clearHistory() {
+    if (!board || !confirmingClearHistory || entries.size === 0) return;
+    entries.clear();
+    marksRevision += 1;
+    confirmingClearHistory = false;
+    cancelScheduledPersistence();
+    void persistLocalStateNow();
+  }
+
   function emptyBoard(): Board {
     return {
       createdAt: new Date().toISOString(),
       habits: [],
-      archivedHabits: [],
       thoughts: [],
       entries: []
     };
@@ -968,7 +906,6 @@
       const loaded = stored ?? emptyBoard();
       hydrateEntries(loaded);
       board = { ...loaded, entries: [] };
-      habitStartKeys.clear();
       if (!stored) await saveBoard(loaded);
     } catch (error) {
       console.error('3tap could not load local data', error);
@@ -1008,12 +945,16 @@
 
   onMount(() => {
     theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    if (!fixtureMode) {
+      const savedView = localStorage.getItem(LAST_VIEW_KEY);
+      if (savedView === 'today' || savedView === 'thoughts' || savedView === 'habits') {
+        view = savedView;
+      }
+    }
 
-    const onDocumentPointerDown = (event: PointerEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (navMenuOpen && !target?.closest('.nav-actions')) navMenuOpen = false;
-    };
     const onResize = () => {
+      viewportWidth = window.innerWidth;
+      habitWidth = historySidebarWidth(board?.habits ?? [], viewportWidth);
       const previousMinimum = minimumVisibleDays;
       updateMinimumVisibleDays();
       const requiredDays = Math.max(WINDOW_DAYS, minimumVisibleDays + WINDOW_SHIFT);
@@ -1041,17 +982,11 @@
       if (document.visibilityState === 'hidden') onPageHide();
     };
 
-    void initialize().then(() => {
-      scroller?.addEventListener('touchstart', startTimelineTouch, { passive: true });
-      scroller?.addEventListener('touchmove', moveTimelineTouch, { passive: false });
-      scroller?.addEventListener('touchend', endTimelineTouch, { passive: true });
-      scroller?.addEventListener('touchcancel', endTimelineTouch, { passive: true });
-    });
+    void initialize();
 
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
-    document.addEventListener('pointerdown', onDocumentPointerDown);
 
     scheduleNextDay();
 
@@ -1063,10 +998,8 @@
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', onResize);
-      document.removeEventListener('pointerdown', onDocumentPointerDown);
       if (dayTimer) clearTimeout(dayTimer);
       cancelScheduledPersistence();
-      if (archiveToastTimer) clearTimeout(archiveToastTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       cleanupItemDrag(false);
       cleanupTimelinePan();
@@ -1079,40 +1012,180 @@
   <meta name="description" content="A tiny three-state daily habit grid." />
 </svelte:head>
 
-<div class="shell">
+<div class="shell" style={`--habit-width: ${habitWidth}px`}>
   <header class="nav-shell">
     <div class="navbar">
       <div class="brand-slot">
-        <button class="brand-button" aria-label="Habits" onclick={() => void switchView('habits')}>3tap</button>
+        <button class="brand-button" aria-label="Today" onclick={() => void switchView('today')}>3tap</button>
       </div>
-      <div class="nav-actions">
+      <nav class="top-tools" aria-label="Pages">
         <button
-          class="nav-more"
-          aria-label="More"
-          aria-haspopup="menu"
-          aria-expanded={navMenuOpen}
-          onclick={() => (navMenuOpen = !navMenuOpen)}
+          class="tool-icon today-tool"
+          class:active={view === 'today'}
+          aria-label="Today"
+          aria-pressed={view === 'today'}
+          title="Today"
+          onclick={() => void switchView('today')}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="6" cy="12" r="1.35"></circle>
-            <circle cx="12" cy="12" r="1.35"></circle>
-            <circle cx="18" cy="12" r="1.35"></circle>
+            <rect x="3.5" y="5.5" width="17" height="15" rx="1"></rect>
+            <path d="M7.5 3v5m9-5v5M3.5 10h17m-12 5.1 2.2 2.2 4.7-4.7"></path>
           </svg>
         </button>
-        {#if navMenuOpen}
-          <div class="nav-menu" role="menu" aria-label="More">
-            <button role="menuitem" onclick={openArchived}>archive</button>
-          </div>
-        {/if}
+        <button
+          class="tool-icon thoughts-tool"
+          class:active={view === 'thoughts'}
+          aria-label="Thoughts"
+          aria-pressed={view === 'thoughts'}
+          title="Thoughts"
+          onclick={() => void switchView('thoughts')}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
+        </button>
+        <button
+          class="tool-icon habits-tool"
+          class:active={view === 'habits'}
+          aria-label="Grid history"
+          aria-pressed={view === 'habits'}
+          title="Grid history"
+          onclick={() => void switchView('habits')}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="4" y="4" width="6" height="6"></rect>
+            <rect x="14" y="4" width="6" height="6"></rect>
+            <rect x="4" y="14" width="6" height="6"></rect>
+            <rect x="14" y="14" width="6" height="6"></rect>
+          </svg>
+        </button>
+      </nav>
+      <div class="theme-slot">
+        <button
+          class="tool-icon theme-tool"
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          onclick={toggleTheme}
+        >
+          {#if theme === 'dark'}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
+              <path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+            </svg>
+          {:else}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path>
+            </svg>
+          {/if}
+        </button>
       </div>
     </div>
   </header>
 
   {#if ready && board}
     <main>
+      {#if view === 'today'}
+        <section class="today-page" aria-label="Today habits">
+          <h1 class="page-heading">today</h1>
+          <div class="today-list">
+            {#each board.habits as habit (habit.id)}
+              {@const value = valueFor(habit.id, todayKey, marksRevision)}
+              <div
+                class="today-row"
+                data-habit-id={habit.id}
+                class:dragging={dragActive && draggingItemId === habit.id}
+                animate:flip={{ duration: dragActive ? 120 : 0 }}
+              >
+                <div class="today-habit">
+                  <button
+                    class="today-drag"
+                    aria-label={`Hold and drag to reorder ${habit.name}`}
+                    title="Hold and drag to reorder"
+                    onpointerdown={(event) => startItemDrag(event, habit.id, 'habit')}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <circle cx="5" cy="4" r="1"></circle><circle cx="11" cy="4" r="1"></circle>
+                      <circle cx="5" cy="8" r="1"></circle><circle cx="11" cy="8" r="1"></circle>
+                      <circle cx="5" cy="12" r="1"></circle><circle cx="11" cy="12" r="1"></circle>
+                    </svg>
+                  </button>
+                  {#if editingHabitId === habit.id}
+                    <input
+                      class="habit-inline-input today-edit-input"
+                      bind:this={editHabitInput}
+                      bind:value={editingHabitName}
+                      aria-label={`Rename ${habit.name}`}
+                      onblur={commitRename}
+                      enterkeyhint="done"
+                      onkeydown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          finishInlineEditFromKeyboard(event.currentTarget);
+                        }
+                        if (event.key === 'Escape') {
+                          editingHabitId = null;
+                          editingHabitName = '';
+                        }
+                      }}
+                    />
+                  {:else}
+                    <button class="today-name" onclick={() => beginRename(habit)}>{habit.name}</button>
+                  {/if}
+                </div>
+                <button
+                  class="today-delete item-delete"
+                  aria-label={`Delete ${habit.name}`}
+                  title="Delete"
+                  onclick={() => deleteHabit(habit.id)}
+                ><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5 19 19 M19 5 5 19" /></svg></button>
+                <div class="today-state-slot">
+                  <button
+                    class="today-state"
+                    class:marked={value > 0}
+                    class:great={value === 2}
+                    aria-label={`${habit.name} today: ${value === 0 ? 'not marked' : value === 1 ? 'done' : 'great'}. Tap to cycle.`}
+                    title={value === 0 ? 'Not marked' : value === 1 ? 'Done' : 'Great'}
+                    onclick={() => tapCell(habit.id, todayKey)}
+                  >{value === 0 ? '□' : symbols[value]}</button>
+                </div>
+              </div>
+            {/each}
+            <div class="today-add-row">
+              {#if addingHabit}
+                <input
+                  class="habit-inline-input today-add-input"
+                  bind:this={newHabitInput}
+                  bind:value={newHabitName}
+                  placeholder="habit"
+                  aria-label="New habit"
+                  onblur={commitAddHabit}
+                  onkeydown={(event) => {
+                    if (event.key === 'Enter') event.currentTarget.blur();
+                    if (event.key === 'Escape') cancelAddHabit();
+                  }}
+                />
+              {:else}
+                <button class="today-add" onclick={beginAddHabit}>+ habit</button>
+              {/if}
+            </div>
+          </div>
+          {#if board.habits.length === 0}
+            <section class="zero-tutorial" aria-label="Getting started">
+              <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
+              <ul class="zero-tutorial-list">
+                <li>tap today or yesterday: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
+                <li>older days lock</li>
+                <li>tap a habit name to rename; drag it to reorder</li>
+              </ul>
+            </section>
+          {/if}
+        </section>
+      {:else}
+        {#if view === 'thoughts'}
+          <h1 class="page-heading">thoughts</h1>
+        {/if}
       <div
         class="grid-scroll"
         class:thoughts-mode={view === 'thoughts'}
+        class:history-editing={view === 'habits' && historyEditing}
         role="region"
         aria-label={view === 'habits' ? 'Habit timeline' : 'Thoughts'}
         bind:this={scroller}
@@ -1123,57 +1196,11 @@
         onpointercancel={endTimelinePan}
       >
         <div class="grid-frame">
+          {#if view === 'habits'}
           <div class="timeline-header" aria-label="Timeline">
             <div class="timeline-side">
-              <nav class="timeline-controls" aria-label="Pages">
-                <button
-                  class="tool-icon habits-tool"
-                  class:active={view === 'habits'}
-                  aria-label="Habits"
-                  aria-pressed={view === 'habits'}
-                  title="Habits"
-                  onclick={() => void switchView('habits')}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="4" y="4" width="6" height="6"></rect>
-                    <rect x="14" y="4" width="6" height="6"></rect>
-                    <rect x="4" y="14" width="6" height="6"></rect>
-                    <rect x="14" y="14" width="6" height="6"></rect>
-                  </svg>
-                </button>
-                <button
-                  class="tool-icon thoughts-tool"
-                  class:active={view === 'thoughts'}
-                  aria-label="Thoughts"
-                  aria-pressed={view === 'thoughts'}
-                  title="Thoughts"
-                  onclick={() => void switchView('thoughts')}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v10.25H9.25L5 19.25V5.5Z"></path></svg>
-                </button>
-                <button
-                  class="tool-icon theme-tool"
-                  aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-                  title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
-                  onclick={toggleTheme}
-                >
-                  {#if theme === 'dark'}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <circle cx="12" cy="12" r="4" class="icon-fill"></circle>
-                      <path d="M12 2v2"></path><path d="M12 20v2"></path>
-                      <path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path>
-                      <path d="M2 12h2"></path><path d="M20 12h2"></path>
-                      <path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path>
-                    </svg>
-                  {:else}
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M20.2 15.4A8.5 8.5 0 0 1 8.6 3.8 9 9 0 1 0 20.2 15.4Z" class="icon-fill" stroke="none"></path>
-                    </svg>
-                  {/if}
-                </button>
-              </nav>
+              <h1 class="page-heading history-heading">history</h1>
             </div>
-            {#if view === 'habits'}
             <div class="timeline-main-header">
               <div class="timeline-meta-row">
                 <div class="start-slot">
@@ -1197,8 +1224,6 @@
                 {#each dates as date (date.key)}
                   <div
                     class="day-head"
-                    class:today={date.key === todayKey}
-                    class:yesterday={date.key === yesterdayKey}
                     class:enrolled={date.key === enrolledKey}
                     class:prestart={isPreEnrollment(date.key)}
                   >
@@ -1208,11 +1233,8 @@
                 {/each}
               </div>
             </div>
-            {:else if view === 'thoughts'}
-              <div class="thoughts-header">
-              </div>
-            {/if}
           </div>
+          {/if}
           {#if view === 'thoughts'}
             <div class="thoughts-grid" aria-label="Thoughts">
               {#each board.thoughts ?? [] as thought (thought.id)}
@@ -1222,12 +1244,19 @@
                   data-thought-id={thought.id}
                   animate:flip={{ duration: dragActive ? 120 : 0 }}
                 >
-                  <div
-                    class="thought-cell"
-                    role="group"
-                    aria-label={`Drag ${thought.text} to reorder`}
-                    onpointerdown={(event) => startItemDrag(event, thought.id, 'thought')}
-                  >
+                  <div class="thought-cell">
+                    <button
+                      class="today-drag"
+                      aria-label={`Hold and drag to reorder ${thought.text}`}
+                      title="Hold and drag to reorder"
+                      onpointerdown={(event) => startItemDrag(event, thought.id, 'thought')}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <circle cx="5" cy="4" r="1"></circle><circle cx="11" cy="4" r="1"></circle>
+                        <circle cx="5" cy="8" r="1"></circle><circle cx="11" cy="8" r="1"></circle>
+                        <circle cx="5" cy="12" r="1"></circle><circle cx="11" cy="12" r="1"></circle>
+                      </svg>
+                    </button>
                     {#if editingThoughtId === thought.id}
                       <input
                         class="thought-input"
@@ -1252,7 +1281,7 @@
                       <button class="thought-label" onclick={() => beginEditThought(thought)}>{thought.text}</button>
                     {/if}
                     <div class="thought-controls">
-                      <button aria-label={`Delete ${thought.text}`} title="Delete" onclick={() => deleteThought(thought.id)}>×</button>
+                      <button class="item-delete" aria-label={`Delete ${thought.text}`} title="Delete" onclick={() => deleteThought(thought.id)}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5 19 19 M19 5 5 19" /></svg></button>
                     </div>
                   </div>
                 </div>
@@ -1278,35 +1307,11 @@
               </div>
             </div>
           {:else if board.habits.length === 0}
-            <div class="zero-add-row">
-              <div class="zero-add-cell">
-                {#if addingHabit}
-                  <input
-                    class="habit-inline-input add-input"
-                    bind:this={newHabitInput}
-                    bind:value={newHabitName}
-                    placeholder="habit"
-                    aria-label="New habit"
-                    onblur={commitAddHabit}
-                    onkeydown={(event) => {
-                      if (event.key === 'Enter') event.currentTarget.blur();
-                      if (event.key === 'Escape') cancelAddHabit();
-                    }}
-                  />
-                {:else}
-                  <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
-                {/if}
-              </div>
-              <div class="zero-add-days" aria-hidden="true">
-                {#each dates as date (date.key)}
-                  <div class="zero-add-day"></div>
-                {/each}
-              </div>
-            </div>
+            <!-- No habit creation in History; use Today to add habits. -->
           {:else}
           <table>
             <tbody>
-            {#each board.habits as habit, habitIndex (habit.id)}
+            {#each board.habits as habit (habit.id)}
               <tr
                 data-habit-id={habit.id}
                 class:dragging={dragActive && draggingItemId === habit.id}
@@ -1335,9 +1340,12 @@
                           }
                         }}
                       />
-                    {:else}
+                    {:else if historyEditing}
                       <button class="habit-label" onclick={() => beginRename(habit)}>{habit.name}</button>
+                    {:else}
+                      <span class="habit-label">{habit.name}</span>
                     {/if}
+                    {#if historyEditing}
                     <div class="habit-controls">
                       <button
                         class="drag-habit"
@@ -1355,87 +1363,70 @@
                         </svg>
                       </button>
                       <button
-                        class="delete-habit"
-                        aria-label={`Archive ${habit.name}`}
-                        title="Archive"
-                        onclick={() => archiveHabit(habitIndex)}
-                      >
-                        <svg class="row-archive-icon" viewBox="0 0 16 16" aria-hidden="true">
-                          <path d="M4.25 5.25h7.5v7.25h-7.5z" />
-                          <path d="M5.25 3.25h5.5" />
-                          <path d="M8 7v3.25" />
-                          <path d="m6.5 8.75 1.5 1.5 1.5-1.5" />
-                        </svg>
-                      </button>
+                        class="delete-habit item-delete"
+                        aria-label={`Delete ${habit.name}`}
+                        title="Delete"
+                        onclick={() => deleteHabit(habit.id)}
+                      ><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5 19 19 M19 5 5 19" /></svg></button>
                     </div>
+                    {/if}
                   </div>
                 </th>
                 {#each dates as date (date.key)}
-                  {@const value = valueFor(habit.id, date.key)}
-                  {@const prestart = date.key === yesterdayKey ? false : isPreEnrollment(date.key) || isBeforeHabitStart(habit, date.key)}
-                  {@const editable = isEditableDate(date.key) && !prestart}
+                  {@const value = valueFor(habit.id, date.key, marksRevision)}
+                  {@const editable = canEditCell(date.key)}
                   <td
-                    class:today={date.key === todayKey}
-                    class:yesterday={date.key === yesterdayKey}
                     class:enrolled={date.key === enrolledKey}
-                    class:prestart={prestart}
-                    class:locked={!editable && !prestart}
+                    class:locked={!editable}
                   >
                     <button
                       class:plus={value === 2}
                       class="cell"
                       disabled={!editable}
-                      aria-label={prestart
-                        ? `${habit.name}, ${date.key}: unavailable`
-                        : `${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', locked'}`}
-                      onpointerdown={(event) => startCellPress(event, habit.id, date.key)}
-                      onpointermove={moveCellPress}
-                      onpointerup={endCellPress}
-                      onpointercancel={cancelCellPress}
+                      aria-label={`${habit.name}, ${date.key}: ${symbols[value]}${editable ? '' : ', view only'}`}
+                      data-habit-id={habit.id}
+                      data-date={date.key}
                       onclick={(event) => {
+                        // Pointer gestures are resolved on the scroll container;
+                        // keyboard-initiated clicks still activate cells normally.
                         if (event.detail === 0) tapCell(habit.id, date.key, event.currentTarget);
-                      }}>{prestart ? '' : symbols[value]}</button>
+                      }}>{symbols[value]}</button>
                   </td>
                 {/each}
               </tr>
             {/each}
-            <tr class="add-row">
-              <th class="habit-name add-habit-cell">
-                {#if addingHabit}
-                  <input
-                    class="habit-inline-input add-input"
-                    bind:this={newHabitInput}
-                    bind:value={newHabitName}
-                    placeholder="habit"
-                    aria-label="New habit"
-                    onblur={commitAddHabit}
-                    onkeydown={(event) => {
-                      if (event.key === 'Enter') event.currentTarget.blur();
-                      if (event.key === 'Escape') cancelAddHabit();
-                    }}
-                  />
-                {:else}
-                  <button class="add-habit" onclick={beginAddHabit}>+ habit</button>
-                {/if}
-              </th>
-              {#each dates as date (date.key)}
-                <td class="add-spacer"></td>
-              {/each}
-            </tr>
           </tbody>
         </table>
           {/if}
         </div>
       </div>
-      {#if view === 'habits' && board.habits.length === 0}
-        <section class="zero-tutorial" aria-label="Getting started">
-          <p class="zero-tutorial-start"><strong>+ habit</strong> to start</p>
-          <ul class="zero-tutorial-list">
-            <li>tap today or yesterday: <b>-</b> missed / <b>|</b> done / <b>+</b> great</li>
-            <li>older days lock</li>
-            <li>tap a habit name to rename; drag it to reorder</li>
-          </ul>
-        </section>
+      {#if view === 'habits'}
+        <div class="history-controls" aria-label="History controls">
+          <button
+            class="history-action mode-toggle"
+            class:editing={historyEditing}
+            aria-pressed={historyEditing}
+            onclick={() => {
+              historyEditing = !historyEditing;
+              editingHabitId = null;
+              editingHabitName = '';
+            }}
+          >{historyEditing ? 'view mode' : 'edit mode'}</button>
+          {#if confirmingClearHistory}
+            <span class="clear-explanation">clear all check-ins?</span>
+            <button class="history-action" onclick={() => confirmingClearHistory = false}>cancel</button>
+            <button class="history-action danger" onclick={clearHistory}>yes, clear</button>
+          {:else}
+            <button class="history-action danger" disabled={historyMarkCount === 0} onclick={() => confirmingClearHistory = true}>clear history</button>
+          {/if}
+        </div>
+        {#if board.habits.length === 0}
+          <section class="zero-history" aria-label="Empty history">
+            <p class="zero-history-title">your history will appear here</p>
+            <p class="zero-history-note">add a habit on today and check in each day to build your history.</p>
+          </section>
+        {/if}
+      {/if}
       {/if}
     </main>
   {/if}
@@ -1451,83 +1442,6 @@
   {/if}
 </div>
 
-{#if panel !== 'none'}
-  <div class="backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (panel = 'none')}>
-    <section class="panel" aria-modal="true" role="dialog">
-      <button class="close" aria-label="Close" onclick={() => (panel = 'none')}>×</button>
-
-      {#if panel === 'archived'}
-        <div class="panel-heading">
-          <h2>archive</h2>
-          <p>Archived habits keep their history. Restore one anytime, or delete it permanently.</p>
-        </div>
-
-        {#if (board?.archivedHabits?.length ?? 0) === 0}
-          <div class="archive-empty-state">
-            <div class="panel-label">archived habits</div>
-            <p class="section-help">Nothing is archived right now.</p>
-          </div>
-        {:else}
-          <div class="archive-section">
-            <div class="panel-label">archived habits</div>
-            <div class="archived-list">
-              {#each board?.archivedHabits ?? [] as habit (habit.id)}
-                {@const historyDays = archivedHistoryDays(habit)}
-                <div class="archived-item">
-                  <div class="archived-copy">
-                    <strong>{habit.name}</strong>
-                    <span>history: {historyDays} {historyDays === 1 ? 'day' : 'days'}</span>
-                  </div>
-                  <div class="archived-actions">
-                    <button class="panel-button" onclick={() => restoreArchivedHabit(habit, habit.position)}>restore</button>
-                    <button class="panel-button panel-button-danger" onclick={() => confirmPermanentDelete(habit)}>delete</button>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          </div>
-
-          <div class="panel-divider"></div>
-
-          <div class="archive-danger-section">
-            <div class="panel-label">clear archive</div>
-            <p class="section-help">Permanently delete every archived habit and all of their history.</p>
-            <button class="panel-button panel-button-danger" onclick={confirmClearArchive}>clear all</button>
-          </div>
-        {/if}
-      {:else if panel === 'delete' && deleteHabitTarget}
-        {@const historyDays = archivedHistoryDays(deleteHabitTarget)}
-        <h2>delete {deleteHabitTarget.name}?</h2>
-        <p>permanently delete this habit and its {historyDays} {historyDays === 1 ? 'day' : 'days'} of history?</p>
-        {#if archiveError}<p class="archive-error" role="alert">{archiveError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={deletingHabit} onclick={deleteHabitForever}>
-            {deletingHabit ? 'deleting…' : 'delete'}
-          </button>
-        </div>
-      {:else if panel === 'clear'}
-        <h2>clear archive?</h2>
-        <p>permanently delete all {board?.archivedHabits?.length ?? 0} archived habits and their history?</p>
-        {#if archiveError}<p class="archive-error" role="alert">{archiveError}</p>{/if}
-        <div class="panel-confirm-actions">
-          <button class="panel-button" onclick={() => (panel = 'archived')}>cancel</button>
-          <button class="panel-button panel-button-danger" disabled={clearingArchive} onclick={clearArchive}>
-            {clearingArchive ? 'clearing…' : 'clear all'}
-          </button>
-        </div>
-      {/if}
-    </section>
-  </div>
-{/if}
-
-{#if archiveToast}
-  <div class="archive-toast" role="status" aria-live="polite">
-    <span><strong>{archiveToast.habit.name}</strong> archived</span>
-    <button onclick={undoArchiveToast}>undo</button>
-  </div>
-{/if}
-
 <style>
   :global(*) { box-sizing: border-box; }
   :global(html) {
@@ -1539,25 +1453,24 @@
     --control-active: #11110f;
     --grid-weak-theme: #deded8;
     --border: #d3d3cd;
-    --panel-border: #cecec8;
     --hover: #e7e7e1;
     --timeline-text: #62635d;
     --timeline-mark: #555650;
-    --today-accent: #075f67;
-    --today-fill: rgba(7,95,103,.18);
-    --yesterday-accent: #875600;
-    --yesterday-fill: rgba(180,118,0,.17);
+    --history-mode-accent: #875600;
     --press-fill: rgba(17,17,15,.13);
     --selection-bg: #b8d7ff;
     --selection-text: #0b1b2b;
-    --backdrop: rgba(17,17,15,.18);
     --shadow: rgba(17,17,15,.16);
-    --nav-shadow: rgba(17,17,15,.08);
+    /* Same icon colors in light and dark mode. */
+    --today-button-color: #26753b;
+    --today-button-border: var(--today-button-color);
+    --icon-today: var(--today-button-color);
     --icon-habits: #225866;
     --icon-thoughts: #af4b53;
-        --icon-archive: #af4b53;
-    --icon-theme: #ca9503;
-    --danger: #9b332b;
+    --delete-color: #af4b53;
+    --icon-theme: #d3a000;
+    --history-edit-surface: #fff2bf;
+    --history-edit-border: #d8bf74;
     background: var(--bg);
     color-scheme: light;
   }
@@ -1570,25 +1483,16 @@
     --control-active: #f2f2ec;
     --grid-weak-theme: #293031;
     --border: #343c3d;
-    --panel-border: #414a4b;
     --hover: #1b2122;
     --timeline-text: #a7afae;
     --timeline-mark: #b2b9b8;
-    --today-accent: #5ecbd0;
-    --today-fill: rgba(94,203,208,.14);
-    --yesterday-accent: #efc95a;
-    --yesterday-fill: rgba(239,201,90,.15);
+    --history-mode-accent: #efc95a;
+    --history-edit-surface: #393013;
+    --history-edit-border: #71602d;
     --press-fill: rgba(255,255,248,.16);
     --selection-bg: #315f8f;
     --selection-text: #ffffff;
-    --backdrop: rgba(0,0,0,.5);
     --shadow: rgba(0,0,0,.42);
-    --nav-shadow: rgba(0,0,0,.28);
-    --icon-habits: #225866;
-    --icon-thoughts: #af4b53;
-        --icon-archive: #af4b53;
-    --icon-theme: #ca9503;
-    --danger: #e58d82;
     color-scheme: dark;
   }
   :global(body) {
@@ -1610,7 +1514,6 @@
   .shell {
     --day-size: 48px;
     --timeline-meta-height: 22px;
-    --habit-width: calc(var(--day-size) * 3);
     --line: 1px;
     --grid: var(--grid-weak-theme);
     --page-inset: 16px;
@@ -1623,7 +1526,10 @@
     background: var(--bg);
   }
   .navbar {
-    position: relative;
+    --nav-end-width: 64px;
+    display: grid;
+    grid-template-columns: var(--nav-end-width) minmax(0, 1fr) var(--nav-end-width);
+    align-items: stretch;
     height: calc(var(--day-size) + env(safe-area-inset-top));
     min-height: calc(var(--day-size) + env(safe-area-inset-top));
     width: 100%;
@@ -1634,7 +1540,7 @@
   }
   .brand-slot {
     position: relative;
-    width: var(--habit-width);
+    min-width: 0;
     height: var(--day-size);
     box-sizing: border-box;
     display: flex;
@@ -1660,94 +1566,24 @@
     font-size: inherit;
     letter-spacing: inherit;
   }
-  .brand-button:focus-visible,
-  .nav-more:focus-visible,
-  .nav-menu button:focus-visible {
+  .brand-button:focus-visible {
     outline: 1px solid var(--control-active);
     outline-offset: -2px;
   }
-  .brand-slot {
-    gap: 10px;
-  }
   .top-tools {
-    position: absolute;
-    top: env(safe-area-inset-top);
-    left: 50%;
-    transform: translateX(-50%);
+    min-width: 0;
     height: var(--day-size);
-    display: grid;
-    grid-template-columns: repeat(3, var(--day-size));
+    display: flex;
+    justify-content: space-evenly;
   }
-  .top-tools .tool-icon {
-    width: var(--day-size);
+  .theme-slot {
+    min-width: 0;
     height: var(--day-size);
     border-left: var(--line) solid var(--grid);
   }
-  .top-tools .tool-icon:last-child { border-right: var(--line) solid var(--grid); }
-  .timeline-side-spacer { width: 100%; height: 100%; }
-  @media (max-width: 620px) {
-    .brand-slot { width: var(--habit-width); padding-left: 12px; }
-    .top-tools { grid-template-columns: repeat(3, var(--day-size)); }
-    .top-tools .tool-icon { width: var(--day-size); }
-  }
+  .top-tools .tool-icon { flex: 0 0 var(--day-size); width: var(--day-size); height: var(--day-size); }
+  .theme-slot .tool-icon { width: 100%; height: var(--day-size); }
 
-  .nav-actions {
-    position: absolute;
-    top: env(safe-area-inset-top);
-    right: 0;
-    width: var(--day-size);
-    height: var(--day-size);
-  }
-  .nav-more {
-    width: var(--day-size);
-    height: var(--day-size);
-    display: grid;
-    place-items: center;
-    color: var(--muted);
-  }
-  .nav-more svg {
-    width: 20px;
-    height: 20px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.5;
-    stroke-linecap: square;
-  }
-  .nav-menu {
-    position: absolute;
-    z-index: 90;
-    top: var(--day-size);
-    right: 0;
-    background: var(--bg);
-    border-left: var(--line) solid var(--grid);
-    border-bottom: var(--line) solid var(--grid);
-  }
-  .nav-menu.icon-menu {
-    width: var(--day-size);
-    display: grid;
-    grid-template-columns: var(--day-size);
-  }
-  .nav-menu .menu-icon-button {
-    width: var(--day-size);
-    height: var(--day-size);
-    display: grid;
-    place-items: center;
-    border-bottom: var(--line) solid var(--grid);
-    color: var(--control-text);
-  }
-  .nav-menu .menu-icon-button:last-child { border-bottom: 0; }
-  .nav-menu .menu-icon-button svg {
-    width: 20px;
-    height: 20px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.4;
-    stroke-linecap: square;
-    stroke-linejoin: miter;
-  }
-  .nav-menu .theme-tool { color: var(--icon-theme); }
-  .nav-menu .theme-tool .icon-fill { fill: currentColor; }
-  .nav-menu .archive-menu-button { color: var(--icon-archive); }
   .start-slot,
   .month-nav,
   .month-slot,
@@ -1814,11 +1650,6 @@
   }
   @media (hover: hover) and (pointer: fine) {
     :global(html:not(.item-dragging-cursor)) .tool-icon:hover::before { opacity: .12; }
-    :global(html:not(.item-dragging-cursor)) .nav-more:hover { color: var(--text); }
-    :global(html:not(.item-dragging-cursor)) .nav-menu button:hover { background: var(--hover); color: var(--control-active); }
-    :global(html:not(.item-dragging-cursor)) .panel-button:not(:disabled):hover { background: var(--hover); border-color: var(--grid); }
-    :global(html:not(.item-dragging-cursor)) .panel-button-danger:not(:disabled):hover { color: var(--danger); }
-    :global(html:not(.item-dragging-cursor)) .close:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
     :global(html:not(.item-dragging-cursor)) .nav-start:hover,
     :global(html:not(.item-dragging-cursor)) .nav-today:hover {
       color: var(--control-active);
@@ -1826,10 +1657,10 @@
       text-decoration: underline;
     }
     :global(html:not(.item-dragging-cursor)) .habit-controls button:not(:disabled):hover,
-    :global(html:not(.item-dragging-cursor)) .thought-controls button:not(:disabled):hover { opacity: 1; }
+    :global(html:not(.item-dragging-cursor)) .thought-controls button:not(:disabled):hover,
+    :global(html:not(.item-dragging-cursor)) .today-delete:hover { opacity: 1; }
     :global(html:not(.item-dragging-cursor)) .cell:not(:disabled):hover { background: var(--hover); }
     .grid-scroll { cursor: grab; }
-    .thought-cell { cursor: grab; }
   }
 
   main { width: 100%; padding-bottom: 24px; }
@@ -1850,8 +1681,7 @@
     overflow-x: hidden;
     cursor: default;
   }
-  .grid-scroll.thoughts-mode .grid-frame,
-  .grid-scroll.thoughts-mode .timeline-header {
+  .grid-scroll.thoughts-mode .grid-frame {
     width: 100%;
     min-width: 100%;
   }
@@ -1878,26 +1708,6 @@
     max-width: var(--habit-width);
     background: var(--bg);
   }
-  .timeline-side::after {
-    content: '';
-    position: absolute;
-    z-index: 9;
-    top: 0;
-    bottom: 0;
-    right: 0;
-    width: var(--line);
-    background: var(--grid);
-    pointer-events: none;
-  }
-  .timeline-controls {
-    width: 100%;
-    height: var(--day-size);
-    margin-top: 0;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-items: stretch;
-  }
-
   .tool-icon {
     position: relative;
     width: 100%;
@@ -1920,8 +1730,6 @@
   }
   .habits-tool { color: var(--icon-habits); }
   .habits-tool.active::before { opacity: .10; }
-  .history-tool { color: var(--icon-habits); }
-  .history-tool.active::before { opacity: .10; }
   .thoughts-tool { color: var(--icon-thoughts); }
   .thoughts-tool.active::before { opacity: .10; }
   .theme-tool { color: var(--icon-theme); }
@@ -1946,18 +1754,8 @@
   .timeline-main-header {
     position: relative;
     width: max-content;
+    min-width: calc(100vw - var(--habit-width));
     height: var(--day-size);
-  }
-  .thoughts-header {
-    flex: 1;
-    min-width: 0;
-    height: var(--day-size);
-    padding: 0 var(--page-inset);
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    color: var(--control-text);
-    font-size: 11px;
   }
   .timeline-meta-row {
     position: sticky;
@@ -2031,8 +1829,8 @@
   th, td {
     padding: 0;
   }
-  tbody tr:not(.add-row) > th,
-  tbody tr:not(.add-row) > td {
+  tbody tr > th,
+  tbody tr > td {
     height: var(--day-size);
     border-bottom: var(--line) solid var(--grid);
   }
@@ -2041,8 +1839,8 @@
     min-width: var(--day-size);
     max-width: var(--day-size);
   }
-tbody tr:not(.add-row) td { position: relative; }
-  tbody tr:not(.add-row) td::before {
+tbody tr td { position: relative; }
+  tbody tr td::before {
     content: '';
     position: absolute;
     z-index: 3;
@@ -2053,7 +1851,7 @@ tbody tr:not(.add-row) td { position: relative; }
     background: var(--grid);
     pointer-events: none;
   }
-tbody tr:not(.add-row) .habit-name + td::before { display: none; }
+tbody tr .habit-name + td::before { display: none; }
 
   .habit-name {
     position: sticky;
@@ -2069,7 +1867,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     white-space: nowrap;
     background: var(--bg);
   }
-  tbody tr:not(.add-row) .habit-name::after {
+  tbody tr .habit-name::after {
     content: '';
     position: absolute;
     z-index: 9;
@@ -2124,11 +1922,6 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .habit-controls .row-archive-icon {
-    width: 18px;
-    height: 18px;
-    stroke-width: 1.5;
-  }
   .habit-controls .row-drag-icon {
     width: 16px;
     height: 16px;
@@ -2140,7 +1933,6 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     touch-action: pinch-zoom;
   }
   .habit-controls .drag-habit:active { cursor: grabbing; }
-  .habit-controls .delete-habit { color: var(--control-text); }
   .habit-name {
     user-select: none;
     -webkit-user-select: none;
@@ -2178,8 +1970,7 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     padding: 0 8px 0 var(--page-inset);
     display: flex;
     align-items: center;
-    gap: 8px;
-    touch-action: pinch-zoom;
+    gap: 16px;
     user-select: none;
     -webkit-user-select: none;
   }
@@ -2211,18 +2002,32 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     width: 36px;
     height: 36px;
   }
-  .thought-controls button {
-    width: 36px;
-    height: 36px;
+  .item-delete {
     display: grid;
     place-items: center;
-    color: var(--icon-archive);
-    font-size: 17px;
-    line-height: 1;
+    color: var(--delete-color);
     opacity: .72;
+    transform: none;
+    padding: 0;
+    line-height: 0;
   }
+  .item-delete svg {
+    display: block;
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+  .item-delete:hover,
+  .item-delete:active,
+  .item-delete:focus-visible { transform: none; }
+  .thought-controls .item-delete { width: 36px; height: 36px; }
+  .habit-controls .item-delete { color: var(--delete-color); opacity: .72; }
   .thought-add-row {
-    padding: 0 var(--page-inset);
+    padding: 0 8px 0 calc(var(--page-inset) + 40px);
+    border-bottom: 0;
     display: flex;
     align-items: center;
   }
@@ -2242,41 +2047,6 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     color: inherit;
     padding: 0;
     font-size: 12px;
-  }
-  .zero-add-row {
-    width: max-content;
-    min-width: 100%;
-    height: var(--day-size);
-    display: flex;
-    align-items: stretch;
-    touch-action: pan-y pinch-zoom;
-    cursor: default;
-  }
-  .zero-add-row * { touch-action: pan-y pinch-zoom; }
-  .zero-add-row button { cursor: pointer; }
-  .zero-add-days {
-    display: flex;
-    width: max-content;
-    height: var(--day-size);
-  }
-  .zero-add-day {
-    width: var(--day-size);
-    min-width: var(--day-size);
-    max-width: var(--day-size);
-    height: var(--day-size);
-  }
-  .zero-add-cell {
-    position: sticky;
-    left: 0;
-    z-index: 5;
-    width: var(--habit-width);
-    min-width: var(--habit-width);
-    max-width: var(--habit-width);
-    height: var(--day-size);
-    padding: 0 8px 0 var(--page-inset);
-    display: flex;
-    align-items: center;
-    background: var(--bg);
   }
   .zero-tutorial {
     width: min(460px, calc(100% - (var(--page-inset) * 2)));
@@ -2321,38 +2091,59 @@ tbody tr:not(.add-row) .habit-name + td::before { display: none; }
     font: inherit;
     font-weight: 600;
   }
-  .add-habit-cell {
-    height: var(--day-size);
-    border: 0;
-    background: var(--bg);
+  .zero-history {
+    width: min(460px, calc(100% - (var(--page-inset) * 2)));
+    margin: 36px auto 0;
+    padding: 0 0 24px;
+    text-align: center;
   }
-  .add-row .add-spacer {
-    width: var(--day-size);
-    min-width: var(--day-size);
-    max-width: var(--day-size);
-    height: var(--day-size);
-    border: 0;
-    background: transparent;
-    vertical-align: top;
+  .zero-history-title {
+    margin: 0 0 10px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
   }
-  .add-row,
-  .add-row * {
-    touch-action: pan-y pinch-zoom;
-    cursor: default;
+  .zero-history-note {
+    margin: 0;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1.65;
   }
-  .add-row button { cursor: pointer; }
-  .add-habit {
+  .history-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px 26px;
     width: 100%;
-    height: 100%;
-    font-size: 11px;
-    opacity: .64;
-    text-align: left;
+    padding: 15px var(--page-inset) 4px;
   }
-  .add-input { width: 100%; }
+  .clear-explanation { color: var(--muted); font-size: 11px; }
+  .history-action { color: var(--control-text); white-space: nowrap; font-size: 11px; }
+  .history-action:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+  .history-action:focus-visible { outline: 1px solid var(--control-active); outline-offset: 4px; }
+  .history-action.mode-toggle.editing { color: var(--history-mode-accent); }
+  .history-action.danger { color: var(--delete-color); }
+  .history-action:disabled { opacity: .32; cursor: default; }
+  @media (max-width: 620px) {
+    .history-controls { padding-left: 12px; padding-right: 12px; gap: 12px; }
+  }
+  /* Edit highlighting belongs to the calendar squares themselves, not to
+     individual buttons: no uneven shades from hover, opacity or mark state. */
+  .grid-scroll.history-editing tbody td {
+    background: var(--history-edit-surface);
+  }
+  .grid-scroll.history-editing .cell,
+  .grid-scroll.history-editing .cell:not(:disabled):hover,
+  .grid-scroll.history-editing .cell:not(:disabled):active {
+    background: transparent;
+    opacity: 1;
+  }
+  .grid-scroll.history-editing .cell:not(:disabled):focus-visible {
+    outline: 1px solid var(--history-edit-border);
+    outline-offset: -1px;
+  }
   td { text-align: center; background: transparent; }
-  td.today { background: var(--today-fill); }
-  td.yesterday { background: var(--yesterday-fill); }
-tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
+tbody tr td.enrolled::before { background: var(--grid); }
   td.prestart { background: transparent; }
   td.locked .cell,
   td.prestart .cell { cursor: default; }
@@ -2370,122 +2161,136 @@ tbody tr:not(.add-row) td.enrolled::before { background: var(--grid); }
   }
   .cell.plus { font-weight: 750; font-size: 17px; }
   .cell:disabled { pointer-events: none; }
-  td.today .cell {
-    color: var(--today-accent);
-    opacity: 1;
-  }
-  td.yesterday .cell {
-    color: var(--yesterday-accent);
-    opacity: 1;
-  }
   .cell:not(:disabled):active { background: var(--press-fill); }
 
   @media (max-width: 767px) {
     input { font-size: 16px; }
   }
 
-  .backdrop { position: fixed; z-index: 100; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 18px; }
-  .panel { position: relative; width: min(420px, 100%); max-height: min(720px, 88dvh); overflow: auto; background: var(--bg); border: 1px solid var(--panel-border); padding: 22px; scrollbar-width: none; }
-  .panel::-webkit-scrollbar { display: none; }
-  .panel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; text-transform: lowercase; }
-  .panel p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-  .close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; display: grid; place-items: center; font-size: 18px; opacity: .68; }
-  .panel-heading { padding-right: 34px; margin-bottom: 18px; }
-  .panel-heading h2 { margin-bottom: 7px; }
-  .panel-label {
-    display: block;
-    margin-bottom: 5px;
-    color: var(--text);
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: lowercase;
+  .top-tools .tool-icon.active::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 64px;
+    max-width: 66%;
+    height: 2px;
+    background: currentColor;
   }
-  .section-help { margin-bottom: 10px !important; }
-  .panel-divider { height: 1px; margin: 20px 0; background: var(--border); }
-  .panel-button {
-    min-height: 34px;
-    display: inline-flex;
+  .today-tool { color: var(--icon-today); }
+  .today-tool.active::before { opacity: .10; }
+  .today-page { width: 100%; }
+  .page-heading {
+    display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    font-size: 10px;
+    height: var(--day-size);
+    margin: 0;
+    padding: 0 var(--page-inset);
+    border-bottom: var(--line) solid var(--grid);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 400;
     line-height: 1;
-    transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+    letter-spacing: .075em;
+    text-transform: uppercase;
   }
-  .panel-button:disabled { opacity: .38; cursor: default; }
-  .panel-button:not(:disabled):active { background: var(--press-fill); }
-  .archive-section,
-  .archive-empty-state,
-  .archive-danger-section {
+  .history-heading {
+    height: 100%;
+    border-bottom: 0;
+    white-space: nowrap;
+  }
+  .today-row {
     display: grid;
-    justify-items: start;
+    grid-template-columns: minmax(0, 1fr) 48px 118px;
+    height: var(--day-size);
+    border-bottom: var(--line) solid var(--grid);
+    align-items: stretch;
   }
-  .archive-empty-state { padding-top: 2px; }
-  .archived-list {
-    width: 100%;
-    display: grid;
-    margin-top: 2px;
-  }
-  .archived-item {
+  .today-row.dragging { opacity: .08; }
+  .today-habit {
+    display: flex;
+    align-items: center;
+    gap: 16px;
     min-width: 0;
-    display: grid;
-    gap: 9px;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
+    padding: 0 8px 0 var(--page-inset);
+    user-select: none;
+    -webkit-user-select: none;
   }
-  .archived-item:first-child { border-top: 1px solid var(--border); }
-  .archived-copy {
+  .today-drag {
+    flex: none;
+    width: 24px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    cursor: grab;
+    touch-action: pinch-zoom;
+    color: var(--control-text);
+  }
+  .today-drag:active { cursor: grabbing; }
+  .today-drag svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+  }
+  .today-name {
+    flex: 1;
     min-width: 0;
-    display: grid;
-    gap: 3px;
-  }
-  .archived-copy strong {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-align: left;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
   }
-  .archived-copy span { color: var(--muted); font-size: 10px; }
-  .archived-actions {
+  .today-edit-input { font-size: 12px; }
+  .today-delete { width: 100%; height: 100%; }
+  .today-state-slot {
+    display: grid;
+    place-items: center;
+    padding: 0 16px 0 10px;
+    border-left: var(--line) solid var(--grid);
+  }
+  .today-state {
+    width: 100%;
+    height: 31px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    color: var(--timeline-text);
+    line-height: 1;
+    font-size: 19px;
+    font-weight: 400;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .today-state.marked {
+    color: var(--today-button-color);
+    border-color: var(--today-button-border);
+  }
+  .today-state.great { font-weight: 700; }
+  .today-state:active { background: var(--press-fill); }
+  .today-state:focus-visible,
+  .today-drag:focus-visible,
+  .today-delete:focus-visible,
+  .today-name:focus-visible,
+  .today-add:focus-visible { outline: 1px solid var(--control-active); outline-offset: -2px; }
+  .today-add-row {
+    height: var(--day-size);
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
+    padding: 0 8px 0 calc(var(--page-inset) + 40px);
   }
-  .panel-button-danger { color: var(--danger); }
-  .archive-error { margin: -6px 0 14px !important; color: var(--danger) !important; }
-  .panel-confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 18px;
+  .today-add { color: var(--muted); font-size: 11px; }
+  .today-add-input { max-width: 340px; }
+  @media (max-width: 620px) {
+    .brand-slot { padding-left: 12px; }
+    .page-heading { padding-left: 12px; }
+    .today-row { grid-template-columns: minmax(0, 1fr) 38px 81px; }
+    .today-habit, .thought-cell { gap: 10px; padding-left: 12px; padding-right: 4px; }
+    .today-drag { width: 24px; }
+    .today-state-slot { padding: 0 10px 0 5px; }
+    .today-state { height: 30px; font-size: 17px; }
+    .today-add-row, .thought-add-row { padding-left: 46px; }
   }
-  .archive-toast {
-    position: fixed;
-    z-index: 120;
-    top: calc(var(--day-size) + env(safe-area-inset-top) + 8px);
-    right: 12px;
-    display: flex;
-    align-items: center;
-    gap: 18px;
-    max-width: calc(100vw - 24px);
-    min-height: 34px;
-    padding: 0 11px;
-    background: var(--text);
-    color: var(--bg);
-    border: 1px solid var(--text);
-    font-size: 11px;
-    white-space: nowrap;
-    box-shadow: 0 3px 10px var(--nav-shadow);
-  }
-  .archive-toast span { overflow: hidden; text-overflow: ellipsis; }
-  .archive-toast strong { font-weight: 600; }
-  .archive-toast button { flex: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
-
 </style>

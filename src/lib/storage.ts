@@ -5,6 +5,9 @@ const DB_VERSION = 1;
 const STORE_NAME = 'state';
 const BOARD_KEY = 'board';
 const LEGACY_BOARD_KEY = '3tap.board.v1';
+type LegacyArchivedHabit = Habit & { archivedAt?: string };
+type LegacyBoard = Board & { archivedHabits?: LegacyArchivedHabit[] };
+
 const LEGACY_KEYS = [
   LEGACY_BOARD_KEY,
   '3tap.queue.v1',
@@ -18,7 +21,7 @@ type CompactBoardV2 = {
   c: string;
   u?: string;
   h: Habit[];
-  a?: Habit[];
+  a?: LegacyArchivedHabit[];
   e: [number, string, MarkValue][];
 };
 
@@ -27,10 +30,25 @@ type CompactBoardV3 = {
   c: string;
   u?: string;
   h: Habit[];
-  a?: Habit[];
+  a?: LegacyArchivedHabit[];
   t?: Thought[];
   e: [number, string, MarkValue][];
 };
+
+// Old archived habits are restored into the active list once, so removing the
+// archive feature does not silently throw away a user's old habits/history.
+function restoreLegacyArchive(legacy: LegacyBoard): Board {
+  const { archivedHabits = [], ...current } = legacy;
+  if (!archivedHabits.length) return current;
+  const ids = new Set(current.habits.map((habit) => habit.id));
+  const habits = [...current.habits];
+  for (const { archivedAt: _archivedAt, ...habit } of archivedHabits) {
+    if (ids.has(habit.id)) continue;
+    ids.add(habit.id);
+    habits.push({ ...habit, position: habits.length });
+  }
+  return { ...current, habits };
+}
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -50,9 +68,9 @@ function openDb() {
 
 function decodeLegacyBoard(raw: string): Board | null {
   try {
-    const cached = JSON.parse(raw) as Board | CompactBoardV2 | CompactBoardV3;
+    const cached = JSON.parse(raw) as LegacyBoard | CompactBoardV2 | CompactBoardV3;
     if (!cached || typeof cached !== 'object') return null;
-    if (!('v' in cached)) return cached as Board;
+    if (!('v' in cached)) return restoreLegacyArchive(cached as LegacyBoard);
     if (cached.v !== 2 && cached.v !== 3) return null;
 
     const habits = cached.h ?? [];
@@ -66,8 +84,7 @@ function decodeLegacyBoard(raw: string): Board | null {
     return {
       createdAt: cached.c,
       updatedAt: cached.u,
-      habits,
-      archivedHabits,
+      habits: restoreLegacyArchive({ createdAt: cached.c, habits, archivedHabits, entries: [] }).habits,
       thoughts: cached.v === 3 ? (cached.t ?? []) : [],
       entries
     };
@@ -76,19 +93,25 @@ function decodeLegacyBoard(raw: string): Board | null {
   }
 }
 
-async function readBoardFromDb(): Promise<Board | null> {
+async function readBoardFromDb(): Promise<LegacyBoard | null> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, 'readonly');
     const request = transaction.objectStore(STORE_NAME).get(BOARD_KEY);
-    request.onsuccess = () => resolve((request.result as Board | undefined) ?? null);
+    request.onsuccess = () => resolve((request.result as LegacyBoard | undefined) ?? null);
     request.onerror = () => reject(request.error ?? new Error('could not read local data'));
   });
 }
 
 export async function loadBoard(): Promise<Board | null> {
   const stored = await readBoardFromDb();
-  if (stored) return stored;
+  if (stored) {
+    if (!('archivedHabits' in stored)) return stored;
+    const restored = restoreLegacyArchive(stored);
+    // Even if persistence fails, never hide the successfully loaded local data.
+    try { await saveBoard(restored); } catch (error) { console.error('3tap could not migrate local data', error); }
+    return restored;
+  }
 
   let legacyRaw: string | null = null;
   try {

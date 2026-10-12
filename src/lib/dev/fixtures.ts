@@ -47,7 +47,7 @@ function historyFixture(days: number, now: Date, sparse = false): Board {
     }
   }
 
-  return { createdAt, habits, archivedHabits: [], thoughts: fakeThoughts(now), entries };
+  return { createdAt, habits, thoughts: fakeThoughts(now), entries };
 }
 
 function lateFixture(now: Date): Board {
@@ -75,7 +75,6 @@ function lateFixture(now: Date): Board {
   return {
     createdAt: atNoon(now, boardStart).toISOString(),
     habits,
-    archivedHabits: [],
     thoughts: fakeThoughts(now),
     entries
   };
@@ -84,7 +83,7 @@ function lateFixture(now: Date): Board {
 export function createDevFixture(name: string, now = new Date()): Board | null {
   switch (name) {
     case 'empty':
-      return { createdAt: atNoon(now, 0).toISOString(), habits: [], archivedHabits: [], thoughts: [], entries: [] };
+      return { createdAt: atNoon(now, 0).toISOString(), habits: [], thoughts: [], entries: [] };
     case '1d': return historyFixture(1, now);
     case '2d': return historyFixture(2, now);
     case '7d': return historyFixture(7, now);
